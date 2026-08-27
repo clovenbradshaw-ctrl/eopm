@@ -48,6 +48,7 @@ import { ensureWorkspaceKey, publishMemberKey, grantWorkspaceKey,
 import { encryptBytesWithKey, decryptBytesWithKey, b64, unb64 } from './crypto/envelope.js';
 import { appendBlock, loadChains, readOwnHead } from './blocks.js';
 import * as driveBackup from './drivebackup.js';
+import * as emailWebhook from './emailWebhook.js';
 
 const NAMESPACE = 'org.baremetalpm';
 const ROOM_TYPE = 'eo.workspace';
@@ -546,6 +547,8 @@ async function afterAuth(userId, homeserver) {
   driveBackup.loadConfig(userId, loadSecret)
     .then(() => driveBackup.ensureBackupInitialized())
     .catch(e => console.warn('[bridge] drive backup init failed:', e?.message || e));
+  emailWebhook.loadConfig(userId, loadSecret)
+    .catch(e => console.warn('[bridge] email webhook config load failed:', e?.message || e));
 
   if (unsubRoomChanges) unsubRoomChanges();
   unsubRoomChanges = onRoomChanges(() => {
@@ -596,6 +599,8 @@ async function afterAuthStale(userId, homeserver) {
 
   driveBackup.loadConfig(userId, loadSecret)
     .catch(e => console.warn('[bridge] drive backup config load failed:', e?.message || e));
+  emailWebhook.loadConfig(userId, loadSecret)
+    .catch(e => console.warn('[bridge] email webhook config load failed:', e?.message || e));
 
   if (unsubRoomChanges) { unsubRoomChanges(); unsubRoomChanges = null; }
 
@@ -1950,6 +1955,16 @@ window.MatrixLive = {
     return driveBackup.saveConfig(userId, cfg, { storeSecret, removeSecret });
   },
   testDriveBackup: () => driveBackup.testConnection(),
+  // Shared email sending (n8n webhook -> Gmail). The secret is vault-
+  // encrypted per user/device, same posture as the Drive backup config
+  // above; sendEmail() throws a plain-language Error on any failure.
+  getEmailConfig: () => emailWebhook.getConfig(),
+  setEmailConfig: (cfg) => {
+    const userId = activeSession?.mxid;
+    if (!userId) throw new Error('Sign in before configuring email');
+    return emailWebhook.saveConfig(userId, cfg, { storeSecret, removeSecret });
+  },
+  sendEmail: (opts) => emailWebhook.sendEmail(opts),
   // Cold-start full sync (durable chain → OPFS) + its progress surface
   getSyncStatus,
   resync: syncAllRooms,

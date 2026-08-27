@@ -94,6 +94,48 @@ function LinkOut({ url, note }) {
 // InvitePanel — the member-side widget
 // ─────────────────────────────────────────────────────────────────────────
 
+// A shared n8n webhook (Gmail underneath) can email the link directly
+// instead of making the inviter copy/paste it. The secret that unlocks
+// it is vault-encrypted per device — nobody types it more than once per
+// device, and it never touches the room's operator log.
+function EmailSendRow({ email, setEmail }) {
+  const ML = window.MatrixLive;
+  const [cfg, setCfg] = useState(() => ML.getEmailConfig());
+  const [secretDraft, setSecretDraft] = useState('');
+  const [savingSecret, setSavingSecret] = useState(false);
+  const [secretErr, setSecretErr] = useState('');
+
+  const needsSecret = email.trim() && !cfg.canSend;
+
+  async function saveSecret() {
+    if (!secretDraft.trim() || savingSecret) return;
+    setSavingSecret(true); setSecretErr('');
+    try { setCfg(await ML.setEmailConfig({ secret: secretDraft.trim() })); setSecretDraft(''); }
+    catch (e) { setSecretErr(e?.message || "Couldn't save that."); }
+    setSavingSecret(false);
+  }
+
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <label style={{ fontSize: 10.5, color: 'var(--text-faint)', display: 'block', marginBottom: 4 }}>email it to them too (optional)</label>
+      <input value={email} onChange={e => setEmail(e.target.value)} placeholder="sam@example.com" style={fieldStyle} />
+      {needsSecret && (
+        <div style={{ marginTop: 6 }}>
+          <div style={{ fontSize: 10.5, color: 'var(--text-faint)', marginBottom: 4, lineHeight: 1.4 }}>
+            One-time setup for this device: paste the email webhook secret to enable sending.
+          </div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input type="password" value={secretDraft} onChange={e => { setSecretDraft(e.target.value); setSecretErr(''); }}
+              onKeyDown={e => e.key === 'Enter' && saveSecret()} placeholder="webhook secret" style={{ ...fieldStyle, flex: 1 }} />
+            <button style={btnStyle(false)} disabled={savingSecret} onClick={saveSecret}>{savingSecret ? <Spinner /> : 'save'}</button>
+          </div>
+          {secretErr && <div style={{ fontSize: 10.5, color: 'var(--red)', marginTop: 4 }}>{secretErr}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function NewGuestTab({ roomId, roomTitle, session }) {
   const [name, setName] = useState('');
   const [role, setRole] = useState('editor');
@@ -103,19 +145,33 @@ function NewGuestTab({ roomId, roomTitle, session }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [link, setLink] = useState(null);
+  const [email, setEmail] = useState('');
+  const [emailStatus, setEmailStatus] = useState(null); // 'sending' | 'sent' | {error}
   const ML = window.MatrixLive;
 
   async function create() {
     const who = name.trim();
     if (busy) return;
     if (!who) { setErr("Add a name so everyone knows who this is."); return; }
-    setBusy(true); setErr(''); setLink(null);
+    setBusy(true); setErr(''); setLink(null); setEmailStatus(null);
     try {
       const acct = await ML.register(homeserver.trim(), { seed: who, registrationToken: token.trim() || undefined });
       try { await ML.inviteUser(roomId, acct.mxid); } catch (e) { /* best-effort; the link still works once they land */ }
       if (ROLE_PL[role] < 0) { try { await ML.setUserPowerLevel(roomId, acct.mxid, ROLE_PL[role]); } catch (e) {} }
       const url = ML.buildInviteLink({ v: 1, hs: acct.domain, u: acct.localpart, p: acct.password, r: roomId, rt: roomTitle, n: who, role, by: session?.mxid });
       setLink({ url, mxid: acct.mxid, name: who }); setNeedToken(false);
+
+      const to = email.trim();
+      if (to && ML.getEmailConfig().canSend) {
+        setEmailStatus('sending');
+        try {
+          await ML.sendEmail({
+            to, subject: `You're invited to ${roomTitle || 'a project'}`,
+            html: `<p>Hi ${who},</p><p>You've been invited to <b>${roomTitle || 'a project'}</b> as ${role === 'viewer' ? 'a viewer' : 'an editor'}.</p><p><a href="${url}">${url}</a></p><p style="color:#888;font-size:12px">This link logs you straight in — no account setup needed.</p>`,
+          });
+          setEmailStatus('sent');
+        } catch (e) { setEmailStatus({ error: e?.message || 'Email failed to send.' }); }
+      }
     } catch (e) {
       if (e && e.code === 'uia' && /registration token/i.test(e.message || '')) { setNeedToken(true); setErr(e.message); }
       else setErr((e && e.message) || "Couldn't create that account.");
@@ -129,7 +185,10 @@ function NewGuestTab({ roomId, roomTitle, session }) {
         Account created for <b>{link.name}</b> (<code>{link.mxid}</code>) · invited as {role}. Send them this link:
       </div>
       <LinkOut url={link.url} note="Carries a one-time password — it stops working once they set their own. Share it privately." />
-      <button style={{ ...btnStyle(false), marginTop: 10 }} onClick={() => setLink(null)}>invite another</button>
+      {emailStatus === 'sending' && <div style={{ fontSize: 10.5, color: 'var(--text-faint)', marginTop: 8, display: 'flex', alignItems: 'center', gap: 6 }}><Spinner size={10} /> emailing {email}…</div>}
+      {emailStatus === 'sent' && <div style={{ fontSize: 10.5, color: 'var(--green)', marginTop: 8 }}><i className="ph ph-check" aria-hidden="true"></i> emailed to {email}</div>}
+      {emailStatus?.error && <div style={{ fontSize: 10.5, color: 'var(--red)', marginTop: 8 }}>couldn't email it: {emailStatus.error} — the link above still works.</div>}
+      <button style={{ ...btnStyle(false), marginTop: 10 }} onClick={() => { setLink(null); setEmailStatus(null); }}>invite another</button>
     </div>
   );
 
@@ -148,6 +207,7 @@ function NewGuestTab({ roomId, roomTitle, session }) {
       {needToken && (
         <input value={token} onChange={e => setToken(e.target.value)} placeholder="registration token" style={{ ...fieldStyle, marginBottom: 8 }} />
       )}
+      <EmailSendRow email={email} setEmail={setEmail} />
       <button style={btnStyle(true)} disabled={busy} onClick={create}>
         {busy ? <Spinner /> : <i className="ph ph-link" aria-hidden="true"></i>}{busy ? 'creating…' : 'create invite link'}
       </button>
@@ -162,18 +222,32 @@ function ExistingMemberTab({ roomId, roomTitle }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [link, setLink] = useState(null);
+  const [email, setEmail] = useState('');
+  const [emailStatus, setEmailStatus] = useState(null);
   const ML = window.MatrixLive;
 
   async function send() {
     const id = mxid.trim();
     if (busy) return;
     if (!/^@[^:\s]+:[^\s]+$/.test(id)) { setErr('Needs a full Matrix ID, like @name:server'); return; }
-    setBusy(true); setErr(''); setLink(null);
+    setBusy(true); setErr(''); setLink(null); setEmailStatus(null);
     try {
       await ML.inviteUser(roomId, id);
       if (ROLE_PL[role] < 0) { try { await ML.setUserPowerLevel(roomId, id, ROLE_PL[role]); } catch (e) {} }
       const url = ML.buildJoinLink({ r: roomId, rt: roomTitle });
       setLink({ url, mxid: id });
+
+      const to = email.trim();
+      if (to && ML.getEmailConfig().canSend) {
+        setEmailStatus('sending');
+        try {
+          await ML.sendEmail({
+            to, subject: `You're invited to ${roomTitle || 'a project'}`,
+            html: `<p>Hi,</p><p>You've been invited to <b>${roomTitle || 'a project'}</b> as ${role === 'viewer' ? 'a viewer' : 'an editor'} (${id}).</p><p><a href="${url}">${url}</a></p><p style="color:#888;font-size:12px">Sign in with your own account and this link drops you straight into the project.</p>`,
+          });
+          setEmailStatus('sent');
+        } catch (e) { setEmailStatus({ error: e?.message || 'Email failed to send.' }); }
+      }
     } catch (e) { setErr((e && e.message) || "Couldn't send that invite."); }
     setBusy(false);
   }
@@ -184,7 +258,10 @@ function ExistingMemberTab({ roomId, roomTitle }) {
         Invited <b>{link.mxid}</b> as {role}. This link drops them straight into the project once they sign in:
       </div>
       <LinkOut url={link.url} note="No password in this one — safe to share more casually. They sign in with their own account." />
-      <button style={{ ...btnStyle(false), marginTop: 10 }} onClick={() => setLink(null)}>invite another</button>
+      {emailStatus === 'sending' && <div style={{ fontSize: 10.5, color: 'var(--text-faint)', marginTop: 8, display: 'flex', alignItems: 'center', gap: 6 }}><Spinner size={10} /> emailing {email}…</div>}
+      {emailStatus === 'sent' && <div style={{ fontSize: 10.5, color: 'var(--green)', marginTop: 8 }}><i className="ph ph-check" aria-hidden="true"></i> emailed to {email}</div>}
+      {emailStatus?.error && <div style={{ fontSize: 10.5, color: 'var(--red)', marginTop: 8 }}>couldn't email it: {emailStatus.error} — the link above still works.</div>}
+      <button style={{ ...btnStyle(false), marginTop: 10 }} onClick={() => { setLink(null); setEmailStatus(null); }}>invite another</button>
     </div>
   );
 
@@ -197,6 +274,7 @@ function ExistingMemberTab({ roomId, roomTitle }) {
       <input value={mxid} onChange={e => { setMxid(e.target.value); setErr(''); }} onKeyDown={e => e.key === 'Enter' && send()}
         placeholder="@name:hyphae.social" style={{ ...fieldStyle, marginBottom: 8 }} />
       <RolePicker role={role} setRole={setRole} />
+      <EmailSendRow email={email} setEmail={setEmail} />
       <button style={btnStyle(true)} disabled={busy} onClick={send}>
         {busy ? <Spinner /> : <i className="ph ph-paper-plane-tilt" aria-hidden="true"></i>}{busy ? 'sending…' : 'send invite'}
       </button>
