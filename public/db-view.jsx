@@ -104,6 +104,121 @@ function TimelineRow({ event, idx, scrubbed, future, isViolation, onClick }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Timeline filtering + export — filter the log by entity type or operator,
+// export the current filter as JSON or CSV. Filtering never renumbers rows:
+// each kept row carries its true index in the full room log, since the
+// scrubber/cursor math (scrubbed/future/onClick in TimelineRow) is defined
+// against that index, not the filtered position.
+// ─────────────────────────────────────────────────────────────────────────
+
+function entityTypeOfEvent(event, state) {
+  const op = window.MatrixEngine.parseEventType(event.type);
+  const c = event.content || {};
+  if (!op) return null;
+  if (op === OP.INS) return c.entity_type || null;
+  if (op === OP.DEF) {
+    if (!c.anchor && c.path?.startsWith('_schema.')) return 'schema';
+    return state.entities[c.anchor]?._type || null;
+  }
+  if (op === OP.SEG || op === OP.EVA) return state.entities[c.anchor]?._type || null;
+  if (op === OP.CON) {
+    return state.entities[c.source_anchor]?._type || state.entities[c.target_anchor]?._type || null;
+  }
+  if (op === OP.SYN) {
+    for (const a of (c.input_anchors || [])) {
+      const t = state.entities[a]?._type;
+      if (t) return t;
+    }
+    return null;
+  }
+  if (op === OP.REC) return 'schema';
+  return null;
+}
+
+function summaryText(event) {
+  const op = window.MatrixEngine.parseEventType(event.type);
+  const c = event.content || {};
+  if (!op) return JSON.stringify(c).slice(0, 200);
+  if (op === OP.INS) return `create ${c.entity_type} ${c.anchor}`;
+  if (op === OP.DEF) {
+    if (!c.anchor && c.path?.startsWith('_schema.')) return `schema ${c.path.replace('_schema.', '')} = ${JSON.stringify(c.value)}`;
+    return `${c.anchor} · ${c.path} = ${JSON.stringify(c.value)}`;
+  }
+  if (op === OP.SEG) return `${c.anchor} → ${c.partition}`;
+  if (op === OP.CON) return `${c.source_anchor} -[${c.relation_type}]→ ${c.target_anchor}`;
+  if (op === OP.SYN) return `synthesis of ${(c.input_anchors || []).length} → ${JSON.stringify(c.output)}`;
+  if (op === OP.EVA) return `${c.anchor} · ${c.criterion} ⇒ ${c.result}${c.note ? ` (${c.note})` : ''}`;
+  if (op === OP.REC) return `${c.scope} recontextualized`;
+  return JSON.stringify(c).slice(0, 200);
+}
+
+function csvCell(v) {
+  const s = String(v ?? '');
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function downloadBlob(filename, content, mime) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function exportEvents(rows, format, roomName, state) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const base = `${(roomName || 'log').replace(/[^a-z0-9-]+/gi, '-')}-${stamp}`;
+  if (format === 'json') {
+    const data = rows.map(({ event, i }) => ({
+      seq: i, type: event.type, content: event.content,
+      sender: event.sender, ts: event.origin_server_ts, event_id: event.event_id,
+    }));
+    downloadBlob(`${base}.json`, JSON.stringify(data, null, 2), 'application/json');
+  } else {
+    const header = ['seq', 'ts', 'iso_time', 'operator', 'entity_type', 'sender', 'event_id', 'summary'];
+    const lines = [header.join(',')];
+    for (const { event, i } of rows) {
+      const op = window.MatrixEngine.parseEventType(event.type);
+      lines.push([
+        i, event.origin_server_ts, event.origin_server_ts ? new Date(event.origin_server_ts).toISOString() : '',
+        op ? op.key : '', entityTypeOfEvent(event, state) || '', event.sender, event.event_id, summaryText(event),
+      ].map(csvCell).join(','));
+    }
+    downloadBlob(`${base}.csv`, lines.join('\n'), 'text/csv');
+  }
+}
+
+function LogFilterBar({ state, entityFilter, setEntityFilter, opFilter, setOpFilter, count, total, onExport }) {
+  const entityTypes = useMemo(() => Object.keys(state.schema?.fields || {}).sort(), [state.schema]);
+  const chip = (active) => ({
+    fontSize: 11, padding: '2px 8px', border: '1px solid var(--border-strong)', cursor: 'pointer',
+    background: active ? 'var(--text)' : 'transparent', color: active ? 'var(--surface)' : 'inherit',
+  });
+  return (
+    <div className="log-filter-bar" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, padding: '6px 10px', borderBottom: '1px solid var(--border)' }}>
+      <span style={{ fontSize: 10.5, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: 1 }}>type</span>
+      <button onClick={() => setEntityFilter(null)} style={chip(!entityFilter)}>all</button>
+      {entityTypes.map(t => (
+        <button key={t} onClick={() => setEntityFilter(entityFilter === t ? null : t)} style={chip(entityFilter === t)}>{t}</button>
+      ))}
+      <button onClick={() => setEntityFilter(entityFilter === 'schema' ? null : 'schema')} style={chip(entityFilter === 'schema')}>schema</button>
+
+      <span style={{ fontSize: 10.5, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: 1, marginLeft: 10 }}>op</span>
+      <select value={opFilter || ''} onChange={e => setOpFilter(e.target.value || null)}
+        style={{ fontSize: 11, padding: '2px 6px', border: '1px solid var(--border-strong)', background: 'transparent' }}>
+        <option value="">all</option>
+        {STORED_OPS.map(op => <option key={op.key} value={op.key}>{op.key}</option>)}
+      </select>
+
+      <span style={{ marginLeft: 'auto', fontSize: 10.5, color: 'var(--text-faint)' }}>{count} of {total}</span>
+      <button onClick={() => onExport('json')} style={chip(false)}>export json</button>
+      <button onClick={() => onExport('csv')} style={chip(false)}>export csv</button>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Operator palette + inline forms
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -420,6 +535,23 @@ function DbView({ rooms, currentRoomId, setCurrentRoomId, createRoom, eventsUpTo
   const violationEvtIds = useMemo(() => new Set(state._violations.map(v => v._eventId).filter(Boolean)), [state._violations]);
   const room = rooms.find(r => r.id === currentRoomId);
   const [subview, setSubview] = useState('timeline'); // 'timeline' | 'state' (mobile only)
+  const [entityFilter, setEntityFilter] = useState(null);
+  const [opFilter, setOpFilter] = useState(null);
+
+  // Filtered rows keep their true index (i) in the full log — see the
+  // helper block above for why that has to survive filtering.
+  const filteredRows = useMemo(() => {
+    return allEvents
+      .map((event, i) => ({ event, i }))
+      .filter(({ event }) => {
+        if (opFilter) {
+          const op = window.MatrixEngine.parseEventType(event.type);
+          if (!op || op.key !== opFilter) return false;
+        }
+        if (entityFilter && entityTypeOfEvent(event, state) !== entityFilter) return false;
+        return true;
+      });
+  }, [allEvents, entityFilter, opFilter, state]);
 
   return (
     <div className="db-view">
@@ -440,14 +572,18 @@ function DbView({ rooms, currentRoomId, setCurrentRoomId, createRoom, eventsUpTo
             <span className="muted" title={room?.id}>append-only event log</span>
             <span className="meta">{allEvents.length} events</span>
           </div>
+          <LogFilterBar
+            state={state}
+            entityFilter={entityFilter} setEntityFilter={setEntityFilter}
+            opFilter={opFilter} setOpFilter={setOpFilter}
+            count={filteredRows.length} total={allEvents.length}
+            onExport={(format) => exportEvents(filteredRows, format, room?.title, state)}
+          />
           <EphemeralLane ephemerals={ephemerals} />
           <div className="col-body" id="tl-body">
             {allEvents.length === 0 && <div className="tl-empty">no events yet — emit one below</div>}
-            {[...allEvents].map((ev, _i, arr) => {
-              // most-recent-first: render reversed but keep idx tied to actual log position
-              const i = arr.length - 1 - _i;
-              const ev2 = arr[i];
-              return (
+            {allEvents.length > 0 && filteredRows.length === 0 && <div className="tl-empty">no events match this filter</div>}
+            {[...filteredRows].reverse().map(({ event: ev2, i }) => (
               <TimelineRow
                 key={ev2.event_id}
                 event={ev2}
@@ -457,8 +593,7 @@ function DbView({ rooms, currentRoomId, setCurrentRoomId, createRoom, eventsUpTo
                 isViolation={violationEvtIds.has(ev2.event_id)}
                 onClick={() => setCursor(i + 1)}
               />
-              );
-            })}
+            ))}
           </div>
           <OpPalette entities={state.entities} onEmit={onEmit} onEphemeral={onEphemeral} />
         </div>
