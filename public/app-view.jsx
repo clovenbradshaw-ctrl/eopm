@@ -36,7 +36,7 @@ function detectAppKind(state) {
 // Schema-driven: reads state.schema.partitions.<type>; no hardcoded columns.
 // ─────────────────────────────────────────────────────────────────────────
 
-function Kanban({ state, onEmit, entityType }) {
+function Kanban({ state, onEmit, entityType, myUserId }) {
   const [dragAnchor, setDragAnchor] = React.useState(null);
   const [dragOverCol, setDragOverCol] = React.useState(null);
   const [newTitles, setNewTitles] = React.useState({});
@@ -235,7 +235,10 @@ function Kanban({ state, onEmit, entityType }) {
                     onDragStart={() => setDragAnchor(t._anchor)}
                     onDragEnd={() => setDragAnchor(null)}
                   >
-                    <div className="title">{t[titleField] || '(no ' + titleField + ')'}</div>
+                    <div className="title" style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 4 }}>
+                      <span>{t[titleField] || '(no ' + titleField + ')'}</span>
+                      <window.SubscribeButton state={state} entityAnchor={t._anchor} onEmit={onEmit} myUserId={myUserId} size={12} />
+                    </div>
                     {metaFields.length > 0 && (
                       <div className="card-fields">
                         {metaFields.map(f => {
@@ -534,7 +537,7 @@ function CreateBoardForm({ state, onEmit, onCancel }) {
 // App view root — picks the projection that fits
 // ─────────────────────────────────────────────────────────────────────────
 
-function AppView({ room, state, onEmit, scrubber, forceTable, forceMode }) {
+function AppView({ room, state, onEmit, scrubber, forceTable, forceMode, myUserId }) {
   const [creating, setCreating] = React.useState(false);
   if (!room) return <div className="empty-app">select a room</div>;
 
@@ -553,7 +556,7 @@ function AppView({ room, state, onEmit, scrubber, forceTable, forceMode }) {
   if (creating) {
     surface = <CreateBoardForm state={state} onEmit={onEmit} onCancel={() => setCreating(false)} />;
   } else if (kind.kind === 'kanban') {
-    surface = <Kanban state={state} onEmit={onEmit} entityType={kind.kanbanType} />;
+    surface = <Kanban state={state} onEmit={onEmit} entityType={kind.kanbanType} myUserId={myUserId} />;
   } else if (kind.kind === 'notebook') {
     surface = <Notebook state={state} />;
   } else {

@@ -136,7 +136,7 @@ function EmailSendRow({ email, setEmail }) {
   );
 }
 
-function NewGuestTab({ roomId, roomTitle, session }) {
+function NewGuestTab({ roomId, roomTitle, session, state, onEmit }) {
   const [name, setName] = useState('');
   const [role, setRole] = useState('editor');
   const [homeserver, setHomeserver] = useState(DEFAULT_HOMESERVER);
@@ -170,6 +170,12 @@ function NewGuestTab({ roomId, roomTitle, session }) {
             html: `<p>Hi ${who},</p><p>You've been invited to <b>${roomTitle || 'a project'}</b> as ${role === 'viewer' ? 'a viewer' : 'an editor'}.</p><p><a href="${url}">${url}</a></p><p style="color:#888;font-size:12px">This link logs you straight in — no account setup needed.</p>`,
           });
           setEmailStatus('sent');
+          // Record the mapping so anyone can reach this person later (the
+          // bulk "update" sender looks recipients up here) without having
+          // to re-type an address someone already gave once.
+          if (window.PeopleDirectory && state && onEmit) {
+            window.PeopleDirectory.setPersonEmail(onEmit, window.MatrixEngine, state, acct.mxid, to, who).catch(() => {});
+          }
         } catch (e) { setEmailStatus({ error: e?.message || 'Email failed to send.' }); }
       }
     } catch (e) {
@@ -216,7 +222,7 @@ function NewGuestTab({ roomId, roomTitle, session }) {
   );
 }
 
-function ExistingMemberTab({ roomId, roomTitle }) {
+function ExistingMemberTab({ roomId, roomTitle, state, onEmit }) {
   const [mxid, setMxid] = useState('');
   const [role, setRole] = useState('editor');
   const [busy, setBusy] = useState(false);
@@ -246,6 +252,9 @@ function ExistingMemberTab({ roomId, roomTitle }) {
             html: `<p>Hi,</p><p>You've been invited to <b>${roomTitle || 'a project'}</b> as ${role === 'viewer' ? 'a viewer' : 'an editor'} (${id}).</p><p><a href="${url}">${url}</a></p><p style="color:#888;font-size:12px">Sign in with your own account and this link drops you straight into the project.</p>`,
           });
           setEmailStatus('sent');
+          if (window.PeopleDirectory && state && onEmit) {
+            window.PeopleDirectory.setPersonEmail(onEmit, window.MatrixEngine, state, id, to, null).catch(() => {});
+          }
         } catch (e) { setEmailStatus({ error: e?.message || 'Email failed to send.' }); }
       }
     } catch (e) { setErr((e && e.message) || "Couldn't send that invite."); }
@@ -283,7 +292,7 @@ function ExistingMemberTab({ roomId, roomTitle }) {
   );
 }
 
-function InvitePanel({ roomId, roomTitle, session, onClose }) {
+function InvitePanel({ roomId, roomTitle, session, state, onEmit, onClose }) {
   const [tab, setTab] = useState('new');
   return (
     <div style={{ position: 'fixed', inset: 0, zIndex: 500, background: 'rgba(0,0,0,.35)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }} onClick={onClose}>
@@ -300,8 +309,8 @@ function InvitePanel({ roomId, roomTitle, session, onClose }) {
         </div>
         <div style={{ padding: 14 }}>
           {tab === 'new'
-            ? <NewGuestTab roomId={roomId} roomTitle={roomTitle} session={session} />
-            : <ExistingMemberTab roomId={roomId} roomTitle={roomTitle} />}
+            ? <NewGuestTab roomId={roomId} roomTitle={roomTitle} session={session} state={state} onEmit={onEmit} />
+            : <ExistingMemberTab roomId={roomId} roomTitle={roomTitle} state={state} onEmit={onEmit} />}
         </div>
       </div>
     </div>

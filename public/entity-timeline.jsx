@@ -50,7 +50,7 @@ function eventSummary(event) {
 // ─────────────────────────────────────────────────────────────────────────
 
 function EntityTimelineView({
-  room, state, entityType, entityAnchor, scrubber, allEventsInRoom, setSelection,
+  room, state, entityType, entityAnchor, scrubber, allEventsInRoom, setSelection, onEmit, myUserId,
 }) {
   if (!room) return <div className="tv-empty">select a room</div>;
 
@@ -135,7 +135,10 @@ function EntityTimelineView({
               title="back to table"
             >← {entityType} table</button>
           </div>
-          <h1 className="page-hero-title">{entity.Title || entity.Name || entity.title || entity.body || entity.claim || entity.what || entity._anchor}</h1>
+          <h1 className="page-hero-title" style={{display:'flex',alignItems:'center',gap:8}}>
+            <span>{entity.Title || entity.Name || entity.title || entity.body || entity.claim || entity.what || entity._anchor}</span>
+            {onEmit && <window.SubscribeButton state={state} entityAnchor={entity._anchor} onEmit={onEmit} myUserId={myUserId} size={18} showLabel />}
+          </h1>
           <div className="page-hero-sub" style={{display:'flex',alignItems:'center',gap:14,flexWrap:'wrap'}}>
             <span>{events.length} event{events.length !== 1 ? 's' : ''} touched this anchor</span>
             {siblings.length > 1 && (

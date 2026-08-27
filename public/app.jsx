@@ -130,7 +130,8 @@ function saveLastView(user, roomId, selection) {
 // blank pane.
 function validSavedSelection(sel) {
   if (!sel || typeof sel !== 'object') return false;
-  if (sel.kind === 'log' || sel.kind === 'sync' || sel.kind === 'chat') return true;
+  if (sel.kind === 'log' || sel.kind === 'sync' || sel.kind === 'chat' ||
+      sel.kind === 'drive' || sel.kind === 'watching') return true;
   if (sel.kind !== 'slice') return false;
   return ['table', 'schema', 'kanban', 'notebook', 'graph', 'timeline'].includes(sel.sliceKind);
 }
@@ -766,6 +767,7 @@ function App() {
 
   const [membersDialogRoomId, setMembersDialogRoomId] = useState(null);
   const [inviteDialogRoomId, setInviteDialogRoomId] = useState(null);
+  const [broadcastDialogRoomId, setBroadcastDialogRoomId] = useState(null);
   // A #join= link's target room, held until a session exists to act on —
   // covers "not signed in yet" (normal login screen shows first) as well
   // as the already-signed-in case (joins immediately, see the effect below).
@@ -795,7 +797,6 @@ function App() {
   const [accountTab, setAccountTab] = useState(null);
 
   const [csvImport, setCsvImport] = useState(null); // {id, file, roomId} | null
-  const [airtableImport, setAirtableImport] = useState(null); // {id} | null
   const [exportingSchema, setExportingSchema] = useState(false);
   const [quickTask, setQuickTask] = useState(false);
   // Time-travel scrubber: collapsed by default; opens via the topbar toggle.
@@ -920,8 +921,8 @@ function App() {
   const [importRowsVersion, setImportRowsVersion] = useState(0);
 
   // Only the newest generation of each re-synced source materializes: a
-  // re-import of the same Airtable base+table supersedes its prior rows rather
-  // than duplicating them (see CsvImport.activeImports).
+  // re-import of the same source supersedes its prior rows rather than
+  // duplicating them (see CsvImport.activeImports).
   const importEntities = useMemo(() => {
     const all = Object.values(state.entities || {}).filter(
       e => e?._type === 'import' && e.derived_set && Array.isArray(e.field_plan)
@@ -934,23 +935,8 @@ function App() {
     [importEntities]
   );
 
-  // The Airtable base to coordinate sync for: whichever base this workspace
-  // imported the most tables from (workspaces are typically one base). Drives
-  // the raise-hand coordinator; null when nothing Airtable was ever imported.
-  const airtableBaseId = useMemo(() => {
-    const counts = {};
-    for (const e of importEntities) {
-      if (e.source === 'airtable' && e.airtable_base) {
-        counts[e.airtable_base] = (counts[e.airtable_base] || 0) + 1;
-      }
-    }
-    let best = null, bestN = 0;
-    for (const [b, n] of Object.entries(counts)) if (n > bestN) { best = b; bestN = n; }
-    return best;
-  }, [importEntities]);
-
-  // Source blobs of *superseded* import generations. A re-synced Airtable
-  // base+table uploads a fresh blob each time; the old generation stops
+  // Source blobs of *superseded* import generations. A re-imported source
+  // uploads a fresh blob each time; the old generation stops
   // materializing (CsvImport.activeImports keeps only the newest per group) but
   // its mirrored blob lingers in OPFS forever — unbounded growth across
   // re-syncs. Collect the dead mxcs (excluding any still referenced by a live
@@ -969,7 +955,7 @@ function App() {
 
   // Drop cached row arrays for imports that aren't active anymore — a re-synced
   // table supersedes its old import anchor and the old rows would otherwise sit
-  // in memory forever. (A 50k-row Airtable table is ~10MB per cached generation.)
+  // in memory forever. (A 50k-row table is ~10MB per cached generation.)
   useEffect(() => {
     const cache = importRowsRef.current;
     let pruned = false;
@@ -1131,32 +1117,18 @@ function App() {
     // superseded re-sync's cached rows from duplicating the current one.
     const anchors = Object.keys(byAnchor).filter(a => state.entities?.[a] && activeImportAnchors.has(a));
 
-    // Airtable inbound sync (airtable-sync.js) writes first-class entities keyed
-    // by a deterministic anchor and tagged `_origin:'airtable'` + `_recordId`.
-    // Each must SHADOW the cold blob row carrying the same `_recordId` (so an
-    // edited/created row wins and isn't shown twice), and a `_deleted` SEG must
-    // hide the record entirely. The blob baseline never mutates — we reconcile
-    // at render time. Keyed only on airtable-origin entities, so a workspace that
-    // never synced from Airtable takes the untouched fast path below.
-    const atShadow = new Map();   // _recordId → isDeleted
-    for (const e of Object.values(state.entities || {})) {
-      if (e && e._origin === 'airtable' && e._recordId != null) {
-        const deleted = e._partition === '_deleted' || state.partitions?.[e._anchor] === '_deleted';
-        atShadow.set(e._recordId, deleted);
-      }
-    }
-
-    if (!anchors.length && !atShadow.size) return state;
+    if (!anchors.length) return state;
     const entities = {};
     for (const a of anchors) for (const row of byAnchor[a]) entities[row._anchor] = row;
     Object.assign(entities, state.entities);
 
-    // Resolve Airtable record-link fields into live connections. Each imported
-    // row carries a hidden `_recordId` (its own Airtable id) and `_linkRefs`
-    // (per link-field arrays of TARGET record ids). With a record-id → anchor
-    // index across every materialized table, those become the same CON edges a
-    // hand-drawn link produces — so link columns populate without per-row
-    // events. Falls back to the folded connections when there's nothing to add.
+    // Resolve imported record-link fields into live connections. Each imported
+    // row carries a hidden `_recordId` (its id in the source system) and
+    // `_linkRefs` (per link-field arrays of TARGET record ids). With a
+    // record-id → anchor index across every materialized table, those become
+    // the same CON edges a hand-drawn link produces — so link columns populate
+    // without per-row events. Falls back to the folded connections when there's
+    // nothing to add.
     let connections = state.connections;
     const idIndex = new Map();
     let hasLinkRefs = false;
@@ -1181,24 +1153,12 @@ function App() {
               const key = row._anchor + '|' + target + '|' + (rel || field);
               if (seen.has(key)) continue;
               seen.add(key);
-              derived.push({ source: row._anchor, target, type: rel || field, _derived: 'airtable' });
+              derived.push({ source: row._anchor, target, type: rel || field, _derived: 'import' });
             }
           }
         }
       }
       if (derived.length) connections = [...state.connections, ...derived];
-    }
-
-    // Apply the Airtable shadow pass: drop each blob row a folded airtable
-    // entity supersedes (by _recordId), and drop both sides of a `_deleted` one.
-    if (atShadow.size) {
-      for (const key of Object.keys(entities)) {
-        const e = entities[key];
-        const rid = e && e._recordId;
-        if (rid == null || !atShadow.has(rid)) continue;
-        if (atShadow.get(rid)) delete entities[key];              // deleted → tombstone + blob row vanish
-        else if (e._origin !== 'airtable') delete entities[key];  // blob duplicate → the folded row wins
-      }
     }
 
     return { ...state, entities, connections };
@@ -1296,57 +1256,47 @@ function App() {
   sessionRef.current = session;
   const stateRef = useRef(state);
   stateRef.current = state;
-  // The Airtable coordinator + sync engine read the FULLY rendered state
-  // (folded events + materialized import rows) so copy-on-write promotion sees
-  // the blob baseline. Mirror it in a ref so the engine's getState() is cheap.
+  // The fully rendered state (folded events + materialized import rows),
+  // mirrored in a ref so background readers get it without a re-render.
   const renderStateRef = useRef(renderState);
   renderStateRef.current = renderState;
   const selectionRef = useRef(selection);
   selectionRef.current = selection;
   const currentRoomIdRef = useRef(currentRoomId);
   currentRoomIdRef.current = currentRoomId;
+  const currentRoomRef = useRef(currentRoom);
+  currentRoomRef.current = currentRoom;
 
   const onEmit = useCallback(async (op, content) => {
     const roomId = currentRoomIdRef.current;
     if (!roomId) return;
+    const sender = sessionRef.current?.mxid;
     if (sessionRef.current && !sessionRef.current.demo) {
       try { await liveStoreRef.current.emit(roomId, op, content); }
       catch (e) { console.warn('[app] live emit failed:', e); }
     } else {
-      demoStoreRef.current.emit(roomId, op, content, sessionRef.current?.mxid);
+      demoStoreRef.current.emit(roomId, op, content, sender);
     }
     setCursor(Infinity);
+
+    // Best-effort: email anyone actively watching this anchor. Fires from
+    // whoever just made the change (this client, right now) — there's no
+    // server to do it instead. See subscribe-button.jsx for the full
+    // rationale and the (anchor, subscriber) cooldown that keeps a burst
+    // of edits from becoming a burst of emails.
+    if (window.notifySubscribers && window.MatrixLive?.sendEmail && sessionRef.current && !sessionRef.current.demo) {
+      const room = currentRoomRef.current;
+      window.notifySubscribers({
+        state: stateRef.current, op, content, sender,
+        roomTitle: room?.title,
+        joinUrl: window.MatrixLive.buildJoinLink({ r: roomId, rt: room?.title }),
+        sendEmail: window.MatrixLive.sendEmail,
+      }).catch(() => {});
+    }
   }, []);
 
   const onEmitRef = useRef(onEmit);
   onEmitRef.current = onEmit;
-
-  // ── Airtable sync coordinator ──
-  // While a live room with an Airtable import is open, attach window.AirtableCoord
-  // so this member participates in turn-taking: it elects one puller among raised
-  // hands (sync FROM Airtable) and drives the auto-push (TO Airtable) seam. It
-  // runs regardless of which view is on screen — not just the Sync page — so a
-  // raised hand keeps pulling in the background. Detaches on room change / logout.
-  useEffect(() => {
-    const Coord = window.AirtableCoord;
-    const isLiveRoom = !!(session && !session.demo && currentRoomId && String(currentRoomId).startsWith('!'));
-    if (!Coord || !isLiveRoom || !airtableBaseId) {
-      if (Coord?.detach && Coord.status?.().attached) Coord.detach();
-      return;
-    }
-    let displayName = null;
-    try { displayName = window.MatrixLive?.getMyDisplayName?.() || null; } catch {}
-    Coord.attach({
-      roomId: currentRoomId,
-      baseId: airtableBaseId,
-      userId: session.mxid,
-      displayName,
-      getState: () => renderStateRef.current,
-      emit: (op, content) => onEmitRef.current(op, content),
-      log: (msg) => console.debug('[airtable]', msg),
-    });
-    return () => { try { Coord.detach(); } catch {} };
-  }, [session, currentRoomId, airtableBaseId]);
 
   const onEphemeral = useCallback((op, content) => {
     const id = ++ephCounterRef.current;
@@ -1372,10 +1322,6 @@ function App() {
   ), [scrubberOpen, live, effectiveCursor, total, ts, onScrubberSeek, onScrubberLive]);
 
   // Sidebar / TableView callbacks — stable across renders.
-  const onAirtableSchemaCb = useCallback(
-    () => setAirtableImport({ id: Date.now() }),
-    []
-  );
   const onExportSchemaCb = useCallback(
     () => setExportingSchema(true),
     []
@@ -1761,6 +1707,12 @@ function App() {
                 title={stale ? 'reconnect to the homeserver to invite people' : 'invite people via a link'}
                 disabled={stale}
               >invite</button>
+              <button
+                className="topbar-members"
+                onClick={() => setBroadcastDialogRoomId(currentRoomId)}
+                title={stale ? 'reconnect to the homeserver to send an update' : 'email a bulk update to chosen people'}
+                disabled={stale}
+              >update</button>
             </>
           );
         })()}
@@ -1798,7 +1750,6 @@ function App() {
           state={renderState}
           selection={selection}
           setSelection={setSelection}
-          onAirtableSchema={onAirtableSchemaCb}
           onExportSchema={onExportSchemaCb}
           onCreateView={createView}
           onRenameView={renameView}
@@ -1809,6 +1760,7 @@ function App() {
           ephemeralsCount={ephemerals.length}
           onRenameRoom={onRenameCurrentRoom}
           lastEventTs={lastEventTs}
+          myUserId={session?.mxid}
           syncOutOfDate={syncOutOfDate}
           syncByTable={syncByTable}
         />
@@ -1817,6 +1769,14 @@ function App() {
           <ViewErrorBoundary
             key={`${selection.kind}:${selection.sliceKind || ''}:${selection.tableId || ''}:${selection.viewId || ''}:${selection.entityAnchor || ''}`}
           >
+          {selection.kind === 'watching' && (
+            <window.WatchingView
+              state={state}
+              myUserId={session?.mxid}
+              setSelection={setSelection}
+              scrubber={scrubberEl}
+            />
+          )}
           {selection.kind === 'log' && (
             <window.DbView
               rooms={rooms}
@@ -1868,6 +1828,16 @@ function App() {
               setSelection={setSelection}
             />
           )}
+          {selection.kind === 'drive' && (
+            <window.DriveView
+              room={currentRoom}
+              state={renderState}
+              onEmit={onEmit}
+              session={session}
+              scrubber={scrubberEl}
+              setSelection={setSelection}
+            />
+          )}
           {selection.kind === 'slice' && (selection.sliceKind === 'table') && (
             <window.TableView
               key={selection.sliceId}
@@ -1900,6 +1870,7 @@ function App() {
               scrubber={scrubberEl}
               forceTable={selection.tableId}
               forceMode="kanban"
+              myUserId={session?.mxid}
             />
           )}
           {selection.kind === 'slice' && selection.sliceKind === 'notebook' && (
@@ -1930,6 +1901,8 @@ function App() {
               scrubber={scrubberEl}
               allEventsInRoom={allEvents}
               setSelection={setSelection}
+              onEmit={onEmit}
+              myUserId={session?.mxid}
             />
           )}
           </ViewErrorBoundary>
@@ -1969,7 +1942,24 @@ function App() {
             roomId={inviteDialogRoomId}
             roomTitle={r.title || r.name}
             session={session}
+            state={state}
+            onEmit={onEmit}
             onClose={() => setInviteDialogRoomId(null)}
+          />
+        );
+      })()}
+
+      {broadcastDialogRoomId && isLive && (() => {
+        const r = rooms.find(x => x.id === broadcastDialogRoomId);
+        if (!r) return null;
+        return (
+          <window.BroadcastPanel
+            roomId={broadcastDialogRoomId}
+            roomTitle={r.title || r.name}
+            session={session}
+            state={state}
+            onEmit={onEmit}
+            onClose={() => setBroadcastDialogRoomId(null)}
           />
         );
       })()}
@@ -1982,16 +1972,6 @@ function App() {
           state={state}
           onEmit={onEmit}
           onClose={() => setCsvImport(null)}
-        />
-      )}
-
-      {airtableImport && window.AirtableSchemaModal && (
-        <window.AirtableSchemaModal
-          schemaImport={airtableImport}
-          roomId={currentRoomId}
-          state={state}
-          onEmit={onEmit}
-          onClose={() => setAirtableImport(null)}
         />
       )}
 

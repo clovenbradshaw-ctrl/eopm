@@ -327,12 +327,22 @@ function relativeTime(ts) {
 function Sidebar({
   room, state, selection, setSelection, onCreateTable,
   onCreateView, onRenameView, onDuplicateView, onDeleteView,
-  eventsTotal, ephemeralsCount, onRenameRoom, lastEventTs, onAirtableSchema,
-  onExportSchema, syncOutOfDate, syncByTable,
+  eventsTotal, ephemeralsCount, onRenameRoom, lastEventTs,
+  onExportSchema, syncOutOfDate, syncByTable, myUserId,
 }) {
   const { sets, meta, raw } = useMemo(() => buildSets(state), [state]);
+  // Files live outside the set list (their `_`-prefixed types are filtered out
+  // of buildSets), so the drive gets its own count.
+  const driveCount = useMemo(
+    () => (window.Drive ? window.Drive.allDocs(state).length : 0),
+    [state]
+  );
   const allSets = [...sets, ...meta];
   const rawSets = raw;
+  const watchingCount = useMemo(
+    () => (window.entitiesIWatch ? window.entitiesIWatch(state, myUserId).length : 0),
+    [state, myUserId]
+  );
   // Sets are open unless the user explicitly collapsed them. Storing
   // collapsed state (rather than open state) avoids the first-mount race
   // where the seed fold hasn't populated entities yet.
@@ -527,6 +537,16 @@ function Sidebar({
         <span className="sb-ask-label">Ask your data</span>
       </button>
 
+      <button
+        className={`sb-ask sb-drive ${selection.kind === 'drive' ? 'active' : ''}`}
+        onClick={() => setSelection({ kind: 'drive' })}
+        title="every file in this workspace — the ones you filed here and the ones attached to records"
+      >
+        <i className="ph ph-folders" aria-hidden="true"></i>
+        <span className="sb-ask-label">Drive</span>
+        {driveCount > 0 && <span className="sb-ask-count">{driveCount}</span>}
+      </button>
+
       <div className="sb-section">
         <div className="sb-section-head">
           <span>sets</span>
@@ -548,10 +568,6 @@ function Sidebar({
         ) : (
           <div className="sb-add-row">
             <button className="sb-add-table" onClick={() => setCreating(true)}>+ new set</button>
-            {onAirtableSchema && (
-              <button className="sb-add-table sb-add-airtable" onClick={onAirtableSchema}
-                title="connect to Airtable with a personal-access token — pick a base, pull its schema (computed fields included) and optionally its records">⊞ airtable</button>
-            )}
           </div>
         )}
         {allSets.map(renderSet)}
@@ -572,6 +588,15 @@ function Sidebar({
           <span>raw</span>
         </div>
         {rawSets.map(renderSet)}
+        <button
+          className={`sb-slice ${selection.kind === 'watching' ? 'active' : ''} kind-log`}
+          onClick={() => setSelection({ kind: 'watching' })}
+          title="things you've subscribed to"
+        >
+          <span className="sb-slice-icon"><i className="ph ph-bell-ringing" aria-hidden="true"></i></span>
+          <span className="sb-slice-name">watching</span>
+          <span className="sb-slice-meta">{watchingCount}</span>
+        </button>
         <button
           className={`sb-slice ${selection.kind === 'log' ? 'active' : ''} kind-log`}
           onClick={() => setSelection({ kind: 'log' })}
