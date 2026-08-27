@@ -334,6 +334,12 @@ function iconForFieldType(t) {
 function formatCardVal(v, t) {
   if (t === 'boolean') return v ? 'yes' : 'no';
   if (t === 'date' && v) {
+    // Date-only values (YYYY-MM-DD, from a <input type=date>) are parsed as
+    // UTC midnight by `new Date()`; toLocaleDateString() then converts that
+    // to the viewer's local zone, which rolls the date back a day west of
+    // UTC. Format the digits directly instead of round-tripping through Date.
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(v));
+    if (m) return `${m[2]}/${m[3]}/${m[1]}`;
     try { return new Date(v).toLocaleDateString(); } catch (e) { return String(v); }
   }
   if (t === 'multiselect' && Array.isArray(v)) return v.join(', ');

@@ -797,6 +797,7 @@ function App() {
   const [csvImport, setCsvImport] = useState(null); // {id, file, roomId} | null
   const [airtableImport, setAirtableImport] = useState(null); // {id} | null
   const [exportingSchema, setExportingSchema] = useState(false);
+  const [quickTask, setQuickTask] = useState(false);
   // Time-travel scrubber: collapsed by default; opens via the topbar toggle.
   // We also force-open it whenever the cursor is *not* live, so the user
   // can always see/return from a scrubbed state.
@@ -1732,6 +1733,16 @@ function App() {
             onCsvFile={(file) => setCsvImport({ id: Date.now(), file, roomId: currentRoomId })}
           />
         )}
+        {currentRoomId && renderState?.schema?.tables?.includes('todo') && (
+          <button
+            className="topbar-import"
+            onClick={() => setQuickTask(true)}
+            title="quickly add a task"
+          >
+            <i className="ph ph-plus" aria-hidden="true"></i>
+            <span>task</span>
+          </button>
+        )}
         {isLive && currentRoomId && (() => {
           const r = currentRoom;
           if (!r || r.membership !== 'join') return null;
@@ -1989,6 +2000,29 @@ function App() {
           room={currentRoom}
           state={renderState}
           onClose={() => setExportingSchema(false)}
+        />
+      )}
+
+      {quickTask && window.QuickTaskModal && (
+        <window.QuickTaskModal
+          state={renderState}
+          onClose={() => setQuickTask(false)}
+          onCreate={({ title, partition, priority, dueDate, listAnchor }) => {
+            const ME = window.MatrixEngine;
+            const sender = '@you:demo';
+            const ts = Date.now();
+            const anchor = ME.makeAnchor('todo', { Title: title }, sender, ts);
+            const payload = { Title: title };
+            if (priority) payload.Priority = priority;
+            if (dueDate) payload['Due Date'] = dueDate;
+            onEmit(ME.OP.INS, { anchor, entity_type: 'todo', payload });
+            onEmit(ME.OP.SEG, { anchor, partition });
+            if (listAnchor) {
+              onEmit(ME.OP.CON, { source_anchor: anchor, target_anchor: listAnchor, relation_type: 'belongs_to' });
+            }
+            setSelection({ kind: 'slice', sliceId: 'todo.kanban', tableId: 'todo', sliceKind: 'kanban' });
+            setQuickTask(false);
+          }}
         />
       )}
     </div>
