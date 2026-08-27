@@ -1248,18 +1248,28 @@ function linkedTypesFor(entityType, state) {
   return Array.from(set);
 }
 
+// Best display label for a linked record: prefer the schema's own text
+// field for that type (whatever it's actually named — e.g. "Title" on
+// todo/todo_list), then fall back to common guesses, then the anchor.
+function displayLabel(entity, type, state) {
+  const fields = state.schema?.fields?.[type];
+  const titleField = Array.isArray(fields) ? fields.find(f => f.type === 'text')?.name : null;
+  if (titleField && entity[titleField]) return entity[titleField];
+  return entity.Title || entity.Name || entity.title || entity.name || entity.body || entity.claim || entity.what;
+}
+
 function linksFromAnchor(anchor, otherType, state) {
   const out = [];
   for (const c of state.connections) {
     if (c.source === anchor) {
       const tgt = state.entities[c.target];
       if (tgt && tgt._type === otherType) {
-        out.push({ anchor: c.target, label: tgt.Name || tgt.title || tgt.body || tgt.claim || tgt.what || c.target.slice(-8), rel: c.type, type: otherType, dir: 'out' });
+        out.push({ anchor: c.target, label: displayLabel(tgt, otherType, state) || c.target.slice(-8), rel: c.type, type: otherType, dir: 'out' });
       }
     } else if (c.target === anchor) {
       const src = state.entities[c.source];
       if (src && src._type === otherType) {
-        out.push({ anchor: c.source, label: src.Name || src.title || src.body || src.claim || src.what || c.source.slice(-8), rel: c.type, type: otherType, dir: 'in' });
+        out.push({ anchor: c.source, label: displayLabel(src, otherType, state) || c.source.slice(-8), rel: c.type, type: otherType, dir: 'in' });
       }
     }
   }
