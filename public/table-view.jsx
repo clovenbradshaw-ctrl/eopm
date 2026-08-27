@@ -499,22 +499,29 @@ function isoDate(d) {
 // Friendly display: "Today" / "Yesterday" / "in 3d" / "May 28" with absolute on hover.
 function formatDateCell(value, opts = {}) {
   if (value === undefined || value === null || value === '') return { text: '', title: '', tone: '' };
+  // Date-only values (e.g. "2026-09-05", from <input type=date>) parse as UTC
+  // midnight. Deriving display from local-timezone getters (startOfDay,
+  // getFullYear) rolls the date back a day west of UTC. For these, compare
+  // and format using the UTC-parsed Y/M/D directly instead. Values with a
+  // time component genuinely need local-timezone math, so they keep it.
+  const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(String(value));
   const d = new Date(value);
   if (isNaN(d.getTime())) return { text: '#date', title: String(value), tone: 'date-invalid' };
 
   const now = new Date();
   const startToday = startOfDay(now);
-  const dDay = startOfDay(d);
+  const dDay = dateOnly ? new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) : startOfDay(d);
   const diffDays = Math.round((dDay.getTime() - startToday.getTime()) / DAY_MS);
 
   const fmt = opts.dateFormat || 'friendly';
-  const includeTime = opts.includeTime;
-  const sameYear = d.getFullYear() === now.getFullYear();
+  const includeTime = opts.includeTime && !dateOnly;
+  const sameYear = (dateOnly ? d.getUTCFullYear() : d.getFullYear()) === now.getFullYear();
   const absLabel = d.toLocaleString(undefined, {
     month: 'short', day: 'numeric',
     year: sameYear ? undefined : 'numeric',
     hour: includeTime ? '2-digit' : undefined,
     minute: includeTime ? '2-digit' : undefined,
+    timeZone: dateOnly ? 'UTC' : undefined,
   });
   const isoLabel = d.toISOString();
 
