@@ -765,6 +765,31 @@ function App() {
   const [demoOn, setDemoOn] = useState(tweaks.demoOnStart);
 
   const [membersDialogRoomId, setMembersDialogRoomId] = useState(null);
+  const [inviteDialogRoomId, setInviteDialogRoomId] = useState(null);
+  // A #join= link's target room, held until a session exists to act on —
+  // covers "not signed in yet" (normal login screen shows first) as well
+  // as the already-signed-in case (joins immediately, see the effect below).
+  const [pendingJoin, setPendingJoin] = useState(() => {
+    if (typeof location === 'undefined' || !location.hash.startsWith('#join=')) return null;
+    const payload = window.MatrixLive?.parseJoinToken?.(location.hash.slice('#join='.length));
+    return payload || null;
+  });
+
+  // Act on a #join= link the moment a real session exists — whether that
+  // session was already live when the link opened, or the user just signed
+  // in through the normal login screen because of it.
+  useEffect(() => {
+    if (!pendingJoin || !session || session.demo) return;
+    let cancelled = false;
+    (async () => {
+      try { await window.MatrixLive.joinRoom(pendingJoin.r); } catch (e) { console.warn('[app] join-link failed:', e); }
+      if (cancelled) return;
+      setCurrentRoomId(pendingJoin.r);
+      setPendingJoin(null);
+      try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
+    })();
+    return () => { cancelled = true; };
+  }, [pendingJoin, session]);
   // Account dashboard: null when closed, else the tab to open ('profile' |
   // 'security' | 'people'). Live (non-demo) sessions only.
   const [accountTab, setAccountTab] = useState(null);
@@ -1396,6 +1421,25 @@ function App() {
     setSelection({ kind: 'slice', sliceId: `${sel.tableId}.view.${view.id}`, tableId: sel.tableId, sliceKind: 'table', viewId: view.id, _seed: { filters: cfg.filters, sorts: cfg.sorts, hidden: cfg.hidden } });
   }, []);
 
+  // A #welcome= invite link takes over the whole screen regardless of
+  // session state — a fresh guest has none yet, and WelcomeInvite itself
+  // handles the "already set up, sign in with your own password" case.
+  if (typeof location !== 'undefined' && location.hash.startsWith('#welcome=')) {
+    const payload = window.MatrixLive?.parseInviteToken?.(location.hash.slice('#welcome='.length));
+    if (payload) {
+      return (
+        <window.WelcomeInvite
+          payload={payload}
+          onDone={(sess, roomId) => {
+            try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
+            setSession(sess);
+            if (roomId) setCurrentRoomId(roomId);
+          }}
+        />
+      );
+    }
+  }
+
   // Gate the app on auth (or demo session) — every hook is above this line.
   // While the bridge is still trying to resume a session from the
   // sessionStorage vault stash, show a splash instead of flashing the
@@ -1693,12 +1737,20 @@ function App() {
           if (!r || r.membership !== 'join') return null;
           const stale = !!session?.stale;
           return (
-            <button
-              className="topbar-members"
-              onClick={() => setMembersDialogRoomId(currentRoomId)}
-              title={stale ? 'reconnect to the homeserver to manage members' : 'manage members of this space'}
-              disabled={stale}
-            >members</button>
+            <>
+              <button
+                className="topbar-members"
+                onClick={() => setMembersDialogRoomId(currentRoomId)}
+                title={stale ? 'reconnect to the homeserver to manage members' : 'manage members of this space'}
+                disabled={stale}
+              >members</button>
+              <button
+                className="topbar-members"
+                onClick={() => setInviteDialogRoomId(currentRoomId)}
+                title={stale ? 'reconnect to the homeserver to invite people' : 'invite people via a link'}
+                disabled={stale}
+              >invite</button>
+            </>
           );
         })()}
         <span className="spacer" />
@@ -1894,6 +1946,19 @@ function App() {
             space={r}
             mySession={session}
             onClose={() => setMembersDialogRoomId(null)}
+          />
+        );
+      })()}
+
+      {inviteDialogRoomId && isLive && (() => {
+        const r = rooms.find(x => x.id === inviteDialogRoomId);
+        if (!r) return null;
+        return (
+          <window.InvitePanel
+            roomId={inviteDialogRoomId}
+            roomTitle={r.title || r.name}
+            session={session}
+            onClose={() => setInviteDialogRoomId(null)}
           />
         );
       })()}

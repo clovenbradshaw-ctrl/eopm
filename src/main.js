@@ -21,7 +21,9 @@ import { login as mxLogin, unlock as mxUnlock,
          tryAutoUnlock, wipeLocalData,
          diagnoseBackup, restoreFromRecoveryKey, getStashedRecoveryKey,
          requestPasswordReset, completePasswordReset, changePassword as mxChangePassword,
-         setProgress, setRecoveryKeyDisplayer, setRecoveryKeyProvider } from './client.js';
+         setProgress, setRecoveryKeyDisplayer, setRecoveryKeyProvider,
+         register as mxRegister, buildInviteLink, parseInviteToken,
+         buildJoinLink, parseJoinToken } from './client.js';
 import { setNamespace, OP, ins, def, seg, con, syn, eva, rec, defSchema, getNamespace,
          setOptimisticHook, eventType as opEventType, emit as rawEmit } from './operators.js';
 import { planLazyImport } from './dataset.js';
@@ -1894,6 +1896,13 @@ window.MatrixLive = {
   requestPasswordReset,
   completePasswordReset,
   changePassword,
+  // Invite links: mint a guest account (register, never touches this
+  // session) + the #welcome=/#join= link encode/decode used by invite-view.jsx
+  register: mxRegister,
+  buildInviteLink,
+  parseInviteToken,
+  buildJoinLink,
+  parseJoinToken,
   getSession: () => activeSession,
   isAuthed: () => !!activeSession,
   isStale: () => !!(activeSession && activeSession.stale),

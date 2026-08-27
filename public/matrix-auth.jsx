@@ -262,7 +262,7 @@ function AppResetLink() {
 function PasswordResetBody({ defaultHomeserver, onBack }) {
   const ML = window.MatrixLive;
   const [step, setStep]           = useState(1);   // 1 = email · 2 = new password
-  const [homeserver, setHomeserver] = useState(defaultHomeserver || 'matrix.org');
+  const [homeserver, setHomeserver] = useState(defaultHomeserver || 'hyphae.social');
   const [email, setEmail]         = useState('');
   const [creds, setCreds]         = useState(null);
   const [pw, setPw]               = useState('');
@@ -426,7 +426,7 @@ function LoginScreen({ onSignIn }) {
   const lastHs    = lastUser && lastUser.includes(':') ? lastUser.split(':')[1] : '';
   const hasAccount = lastUser ? !!ML?.hasLocalAccount?.(lastUser) : false;
 
-  const [homeserver, setHomeserver] = useState(lastHs || 'matrix.org');
+  const [homeserver, setHomeserver] = useState(lastHs || 'hyphae.social');
   const [username, setUsername]     = useState(lastLocal);
   const [password, setPassword]     = useState('');
   // Persist the unlock key across browser restarts so the user isn't
@@ -546,11 +546,11 @@ function LoginScreen({ onSignIn }) {
                   <input
                     value={homeserver}
                     onChange={e => setHomeserver(e.target.value)}
-                    placeholder="matrix.org"
+                    placeholder="hyphae.social"
                     spellCheck={false}
                   />
                 </div>
-                <span className="login-hint">where your account lives · default: matrix.org</span>
+                <span className="login-hint">where your account lives · default: hyphae.social</span>
               </label>
             )}
 
@@ -593,17 +593,17 @@ function LoginScreen({ onSignIn }) {
               <div className="register-pitch-title">don't have a matrix account?</div>
               <div className="register-pitch-body">
                 matrix is a federated network — accounts live on a homeserver of your choice.
-                the easiest way to get started is on the public <b>matrix.org</b> homeserver.
+                this workspace defaults to <b>hyphae.social</b>; if someone invited you, look for a link instead — it sets your account up automatically.
               </div>
             </div>
             <a
               className="login-primary"
-              href="https://app.element.io/#/register"
+              href="https://app.element.io/#/register?hs_url=https%3A%2F%2Fhyphae.social"
               target="_blank"
               rel="noopener noreferrer"
               style={{textAlign:'center',textDecoration:'none',display:'block'}}
             >
-              create account on matrix.org →
+              create account on hyphae.social →
             </a>
             <div className="login-divider"><span>then</span></div>
             <button className="login-ghost" onClick={() => setMode('signin')}>

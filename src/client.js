@@ -762,6 +762,169 @@ export async function login(homeserver, username, password, { persist = false } 
   return { client, userId: resp.user_id, deviceId: resp.device_id };
 }
 
+// ── Account registration (mint a brand-new account) ───────────────────────
+//
+// Used by the invite-link flow: an existing member mints a fresh account
+// for a guest. Runs against a throwaway, unauthenticated client — it never
+// touches the module-level `client` or the caller's own session, so the
+// inviter stays signed in as themselves throughout. inhibit_login means the
+// homeserver brings the account into being but mints no token/device for
+// it here; the new owner logs in fresh via login() above, which is what
+// actually brings up their crypto (register() intentionally does not).
+//
+// Handles the two UIA stages a browser can complete unaided:
+// m.login.dummy (open registration) and m.login.registration_token (an
+// admin-issued token). Anything else — CAPTCHA, email/phone verification —
+// surfaces a plain-language reason instead of hanging.
+
+// A "hashid"-style suffix: short, CSPRNG, and drawn from an alphabet that
+// drops look-alike glyphs (no 0/O, 1/l/i) and vowels, so it never spells an
+// accidental word and is hard to mistype. 27 symbols, so five of them is
+// ~14M combinations — collisions are rare and register() retries the few
+// that happen, so an auto-minted handle effectively always lands.
+const HASHID_ALPHABET = '23456789bcdfghjkmnpqrstvwxz';
+function hashid(len = 6) {
+  const A = HASHID_ALPHABET, ceil = 256 - (256 % A.length);
+  const bytes = new Uint8Array(len * 2);
+  crypto.getRandomValues(bytes);
+  let out = '', bi = 0;
+  for (let i = 0; i < len; i++) {
+    let b = bytes[bi++];
+    while (b >= ceil) { if (bi >= bytes.length) { crypto.getRandomValues(bytes); bi = 0; } b = bytes[bi++]; }
+    out += A[b % A.length];
+  }
+  return out;
+}
+
+// A human-friendly localpart: an optional name-slug (so a guest reads as
+// @sam-rivera-x3f9, not @x3f9) plus a hashid suffix that makes it unique.
+function randomLocalpart(seed) {
+  const slug = String(seed || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9._=\-/]+/g, '-')
+    .replace(/[-._/]{2,}/g, '-')
+    .replace(/^[-._/]+|[-._/]+$/g, '')
+    .slice(0, 16)
+    .replace(/[-._/]+$/g, '');
+  return (slug || 'guest') + '-' + hashid(5);
+}
+
+function randomPassword() {
+  // 18 CSPRNG bytes → ~24 url-safe chars. Short-lived by design: the
+  // invite link's first run forces a replacement, so this is never a
+  // credential its owner has to remember.
+  const a = new Uint8Array(18);
+  crypto.getRandomValues(a);
+  let s = ''; for (let i = 0; i < a.length; i++) s += String.fromCharCode(a[i]);
+  return btoa(s).replace(/\+/g, 'A').replace(/\//g, 'B').replace(/=+$/, '');
+}
+
+function pickRegisterFlow(flows, hasToken) {
+  const can = (s) => s === 'm.login.dummy' || (s === 'm.login.registration_token' && hasToken);
+  const usable = (flows || []).map(f => f?.stages || []).filter(st => st.length && st.every(can));
+  usable.sort((a, b) => a.length - b.length);
+  return usable[0] || null;
+}
+
+function registerFlowMessage(flows) {
+  const all = new Set();
+  (flows || []).forEach(f => (f?.stages || []).forEach(s => all.add(s)));
+  if (all.has('m.login.registration_token')) return 'This homeserver needs a registration token — ask its admin for one.';
+  if (all.has('m.login.recaptcha')) return "This homeserver requires a CAPTCHA to register, which can't be completed from here.";
+  if (all.has('m.login.email.identity') || all.has('m.login.msisdn')) return 'This homeserver requires email or phone verification to register.';
+  return "This homeserver doesn't allow creating accounts from the browser.";
+}
+
+/**
+ * Mint a brand-new account on `homeserver`.
+ *
+ * @param {string} homeserver - bare domain ("hyphae.social") or a full mxid
+ *   (":server" is split off)
+ * @param {object} [opts]
+ * @param {string} [opts.seed] - a display hint the auto-minted localpart is
+ *   derived from (e.g. the guest's name)
+ * @param {string} [opts.username] - an explicit handle instead of an
+ *   auto-minted one; a collision surfaces to the caller rather than retrying
+ * @param {string} [opts.registrationToken]
+ * @returns {Promise<{mxid, localpart, domain, password, base_url}>}
+ */
+export async function register(homeserver, { seed, username, registrationToken } = {}) {
+  const raw = String(homeserver || '').trim();
+  const dom = (raw.includes(':') ? raw.split(':').pop() : raw).replace(/^https?:\/\//, '').replace(/\/.*$/, '').trim();
+  if (!dom) throw new Error('Need a homeserver to register on');
+
+  const baseUrl = await discoverBaseUrl('https://' + dom);
+  const tmp = sdk.createClient({ baseUrl });
+  const pw = randomPassword();
+  const explicit = String(username || '').trim();
+
+  async function attempt(localpart) {
+    const body = { username: localpart, password: pw, inhibit_login: true };
+    let uiaSession = null, flows = null, doneStages = [];
+    for (let i = 0; i < 8; i++) {
+      let auth;
+      if (uiaSession) {
+        const flow = pickRegisterFlow(flows, !!registrationToken);
+        if (!flow) { const e = new Error(registerFlowMessage(flows)); e.code = 'uia'; e.flows = flows; throw e; }
+        const next = flow.find(s => !doneStages.includes(s)) || flow[flow.length - 1];
+        auth = next === 'm.login.registration_token'
+          ? { type: 'm.login.registration_token', token: registrationToken, session: uiaSession }
+          : { type: 'm.login.dummy', session: uiaSession };
+      }
+      try {
+        const data = await tmp.registerRequest(auth ? { ...body, auth } : body);
+        return { mxid: data.user_id || ('@' + localpart + ':' + dom), localpart, domain: dom, password: pw, base_url: baseUrl };
+      } catch (e) {
+        const data = e?.data || {};
+        if (e?.httpStatus === 401 && Array.isArray(data.flows)) {
+          flows = data.flows; uiaSession = data.session; doneStages = data.completed || [];
+          if (!pickRegisterFlow(flows, !!registrationToken)) { const err = new Error(registerFlowMessage(flows)); err.code = 'uia'; err.flows = flows; throw err; }
+          continue;
+        }
+        if (data.errcode === 'M_USER_IN_USE') { const err = new Error('That username is taken.'); err.code = 'M_USER_IN_USE'; throw err; }
+        if (data.errcode === 'M_FORBIDDEN') throw new Error('This homeserver has registration closed.');
+        throw new Error(data.error || e?.message || 'Registration failed');
+      }
+    }
+    throw new Error("Registration didn't complete on this homeserver.");
+  }
+
+  let localpart = explicit || randomLocalpart(seed);
+  let lastErr;
+  for (let tries = 0; tries < (explicit ? 1 : 6); tries++) {
+    try { return await attempt(localpart); }
+    catch (e) {
+      lastErr = e;
+      if (!explicit && e.code === 'M_USER_IN_USE') { localpart = randomLocalpart(seed); continue; }
+      throw e;
+    }
+  }
+  throw lastErr;
+}
+
+// ── Invite links ────────────────────────────────────────────────────────
+// Everything a newcomer needs to open a guest account rides in the URL
+// fragment (#welcome=…), which browsers never send to a server. A link for
+// someone who already has an account carries no secret at all (#join=…) —
+// just enough to find and enter the right room once they sign in themselves.
+function b64urlEncode(str) { return btoa(unescape(encodeURIComponent(str))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+function b64urlDecode(str) { return decodeURIComponent(escape(atob(String(str).replace(/-/g, '+').replace(/_/g, '/')))); }
+
+export function buildInviteLink(payload) {
+  return location.origin + location.pathname + '#welcome=' + b64urlEncode(JSON.stringify(payload || {}));
+}
+export function parseInviteToken(token) {
+  try { const p = JSON.parse(b64urlDecode(token)); if (p && p.u && p.p && p.hs) return p; } catch (e) {}
+  return null;
+}
+export function buildJoinLink(payload) {
+  return location.origin + location.pathname + '#join=' + b64urlEncode(JSON.stringify(payload || {}));
+}
+export function parseJoinToken(token) {
+  try { const p = JSON.parse(b64urlDecode(token)); if (p && p.r) return p; } catch (e) {}
+  return null;
+}
+
 // ── Password reset & change ──────────────────────────────────────────────
 //
 // Two distinct flows live here:
