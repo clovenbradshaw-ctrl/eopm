@@ -1472,9 +1472,70 @@ function App() {
     onEphemeral(ME.OP.SIG, { target: label, note: zone });
   }
 
+  // Every room this app creates is a project workspace — seed it with the
+  // todo / todo_list taxonomy (fields, kanban partitions, the todo→todo_list
+  // link) plus one starter list, so a fresh project is never a blank page.
+  // Mirrors the manual "add table" flow (onCreateTableCb above) but writes
+  // the whole PM shape in one shot, directly against the new room's id
+  // (not through onEmit, whose currentRoomIdRef hasn't caught up yet here).
+  async function seedProjectSchema(roomId) {
+    const ME = window.MatrixEngine;
+    const emitTo = (op, content) => (
+      isLive
+        ? liveStore.emit(roomId, op, content)
+        : demoStore.emit(roomId, op, content, session?.mxid)
+    );
+
+    await emitTo(ME.OP.DEF, { anchor: null, path: '_schema.tables', value: ['todo_list', 'todo'] });
+    await emitTo(ME.OP.DEF, {
+      anchor: null,
+      path: '_schema.fields.todo_list',
+      value: [
+        { name: 'Title', type: 'text' },
+        { name: 'Description', type: 'longtext' },
+      ],
+    });
+    await emitTo(ME.OP.DEF, {
+      anchor: null,
+      path: '_schema.fields.todo',
+      value: [
+        { name: 'Title', type: 'text' },
+        { name: 'Description', type: 'longtext' },
+        { name: 'Done', type: 'boolean' },
+        { name: 'Priority', type: 'select', options: ['none', 'low', 'medium', 'high', 'urgent'] },
+        { name: 'Due Date', type: 'date' },
+      ],
+    });
+    await emitTo(ME.OP.DEF, { anchor: null, path: '_schema.partitions.todo', value: ['backlog', 'doing', 'review', 'done'] });
+    await emitTo(ME.OP.DEF, {
+      anchor: null,
+      path: '_schema.links',
+      value: [{ from: 'todo', to: 'todo_list', rel: 'belongs_to' }],
+    });
+
+    // Friendly first-run content: one list, three cards already in Backlog.
+    const ts0 = Date.now();
+    const listAnchor = ME.makeAnchor('todo_list', {}, '@you:demo', ts0);
+    await emitTo(ME.OP.INS, { anchor: listAnchor, entity_type: 'todo_list', payload: { Title: 'Getting started' } });
+
+    const seedTodos = [
+      'Invite your team',
+      'Create your first real to-do list',
+      'Drag a card from Backlog into Doing',
+    ];
+    for (let i = 0; i < seedTodos.length; i++) {
+      const ts = ts0 + i + 1;
+      const todoAnchor = ME.makeAnchor('todo', { Title: seedTodos[i] }, '@you:demo', ts);
+      await emitTo(ME.OP.INS, { anchor: todoAnchor, entity_type: 'todo', payload: { Title: seedTodos[i] } });
+      await emitTo(ME.OP.SEG, { anchor: todoAnchor, partition: 'backlog' });
+      await emitTo(ME.OP.CON, { source_anchor: todoAnchor, target_anchor: listAnchor, relation_type: 'belongs_to' });
+    }
+  }
+
   async function onCreateRoom(name) {
     if (isLive) {
       const roomId = await liveStore.createRoom(name);
+      await seedProjectSchema(roomId);
       setCurrentRoomId(roomId);
       return roomId;
     }
@@ -1485,6 +1546,7 @@ function App() {
     let n = 2;
     while (demoStore.byRoom[id]) { id = `!${slug}_${n++}`; }
     demoStore.createRoom(id);
+    await seedProjectSchema(id);
     setDemoTitleOverrides(o => ({ ...o, [id]: name }));
     setCurrentRoomId(id);
     return id;

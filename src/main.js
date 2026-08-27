@@ -47,7 +47,7 @@ import { encryptBytesWithKey, decryptBytesWithKey, b64, unb64 } from './crypto/e
 import { appendBlock, loadChains, readOwnHead } from './blocks.js';
 import * as driveBackup from './drivebackup.js';
 
-const NAMESPACE = 'io.matrix-events';
+const NAMESPACE = 'org.baremetalpm';
 const ROOM_TYPE = 'eo.workspace';
 
 // Hard heap budget for the whole tab. The governor sheds inactive state
