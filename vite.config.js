@@ -3,7 +3,7 @@ import wasm from 'vite-plugin-wasm';
 import topLevelAwait from 'vite-plugin-top-level-await';
 
 export default defineConfig({
-  base: process.env.GITHUB_ACTIONS ? '/bare-metal-pm/' : '/',
+  base: process.env.GITHUB_ACTIONS ? '/eopm/' : '/',
   plugins: [wasm(), topLevelAwait()],
   build: { target: 'esnext' },
   optimizeDeps: {
