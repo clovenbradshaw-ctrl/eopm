@@ -859,10 +859,11 @@ function orderDetailCols(cols, order) {
 
 function RecordDetailPanel({
   record, records, entityType, room, cols, partitioned, linkedTypes, state, selectOptions,
-  onClose, onCommitCell, onCommitPartition, onAddOption, onJump, onSelectRecord, onViewTimeline,
+  onClose, onCommitCell, onCommitPartition, onAddOption, onJump, onSelectRecord, onViewTimeline, onArchive,
   recordViews, activeViewId, onSelectView, onCreateView, onUpdateView, onDeleteView, onRenameView,
   fullscreen, onToggleFullscreen,
 }) {
+  const archived = !!record._archived;
   const [customizeOpen, setCustomizeOpen] = useState(false);
   const [viewMenuOpen, setViewMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(null); // viewId being renamed, or null
@@ -1036,7 +1037,10 @@ function RecordDetailPanel({
               <button className="rd-close" title="close · esc" onClick={onClose}>×</button>
             </div>
           </div>
-          <h2 className="rd-title" title={title}>{title}</h2>
+          <h2 className="rd-title" title={title}>
+            {title}
+            {archived && <span className="rd-archived-tag" title="archived · hidden from the default view">archived</span>}
+          </h2>
           <code className="rd-anchor" title="permanent anchor id">{record._anchor}</code>
         </header>
 
@@ -1180,6 +1184,16 @@ function RecordDetailPanel({
         <footer className="rd-foot">
           <button className="rd-timeline-btn" onClick={() => onViewTimeline(record._anchor)} title="replay every event that produced this record">
             ⏚ view full timeline
+          </button>
+          <button
+            className={`rd-archive-btn ${archived ? 'is-archived' : ''}`}
+            onClick={() => onArchive(record._anchor, !archived)}
+            title={archived
+              ? 'unarchive · bring this row back into the default view'
+              : 'archive · hide this row from the default view without deleting it from the log'}
+          >
+            <i className={`ph ph-${archived ? 'arrow-counter-clockwise' : 'archive'}`} aria-hidden="true"></i>
+            {archived ? ' unarchive' : ' archive row'}
           </button>
         </footer>
       </aside>
@@ -1537,6 +1551,17 @@ function DbTable({ entityType, state, room, onEmit, onJump, jumpHighlight, showD
   const declaredInSchema = !!state.schema?.fields?.[entityType] || (state.schema?.tables || []).includes(entityType);
   const [heatOn, setHeatOn] = useState(false);
   const [showFormula, setShowFormula] = useState(false);
+  // Archived rows (e.g. a stray blank row from Tab/Enter-past-the-last-cell)
+  // stay in the log forever but drop out of the default view. `rows` below
+  // still means "every row of this type" for anything that needs the full
+  // set (the detail panel's prev/next, total counts); `activeRows` is what
+  // the grid body actually renders.
+  const [showArchived, setShowArchived] = useState(false);
+  const archivedCount = useMemo(() => rows.filter(r => r._archived).length, [rows]);
+  const activeRows = useMemo(
+    () => showArchived ? rows : rows.filter(r => !r._archived),
+    [rows, showArchived]
+  );
   // Header-rename mode for one column at a time. {oldName, draft}.
   const [renamingField, setRenamingField] = useState(null);
   // Right-click column-type picker. {name, x, y} | null
@@ -1740,7 +1765,7 @@ function DbTable({ entityType, state, room, onEmit, onJump, jumpHighlight, showD
   // Filtered + sorted rows actually rendered. Filters/sorts read computed cell
   // values (formula/rollup included) so the view matches what's on screen.
   const displayRows = useMemo(() => {
-    let out = rows;
+    let out = activeRows;
     if (filters.length) {
       out = out.filter(r => filters.every(f => {
         const col = cols.find(c => c.name === f.field);
@@ -1758,7 +1783,7 @@ function DbTable({ entityType, state, room, onEmit, onJump, jumpHighlight, showD
       });
     }
     return out;
-  }, [rows, filters, sorts, cols, state]);
+  }, [activeRows, filters, sorts, cols, state]);
 
   // ── Row virtualization ───────────────────────────────────────────────
   // A non-virtualized grid happily renders a few hundred rows, but a CSV
@@ -1864,6 +1889,11 @@ function DbTable({ entityType, state, room, onEmit, onJump, jumpHighlight, showD
   }
   function commitPartition(anchor, partition) {
     onEmit(TV_OP.SEG, { anchor, partition });
+  }
+  // Archiving is a DEF like any other field write — nothing is ever deleted
+  // from the log, an archived row just stops showing up in the default view.
+  function setArchived(anchor, archived) {
+    onEmit(TV_OP.DEF, { anchor, path: '_archived', value: archived });
   }
 
   // ── Detail (record) views ───────────────────────────────────────────────
@@ -2041,9 +2071,16 @@ function DbTable({ entityType, state, room, onEmit, onJump, jumpHighlight, showD
           {!declaredInSchema && <span style={{color:'var(--signal)',marginLeft:8,fontWeight:400}}>? unschematized</span>}
         </div>
         <div className="meta">
-          {filters.length && displayRows.length !== rows.length
-            ? <span title={`${rows.length} total · ${filters.length} filter${filters.length!==1?'s':''} active`}>{displayRows.length} of {rows.length} rows</span>
-            : <span>{rows.length} row{rows.length!==1?'s':''}</span>}
+          {filters.length && displayRows.length !== activeRows.length
+            ? <span title={`${activeRows.length} total · ${filters.length} filter${filters.length!==1?'s':''} active`}>{displayRows.length} of {activeRows.length} rows</span>
+            : <span>{activeRows.length} row{activeRows.length!==1?'s':''}</span>}
+          {archivedCount > 0 && (
+            <button
+              className={`heat-toggle ${showArchived ? 'on' : ''}`}
+              onClick={() => setShowArchived(o => !o)}
+              title={showArchived ? 'hide archived rows' : 'show archived rows · archived rows never appear by default'}
+            >{archivedCount} archived</button>
+          )}
           <button
             className={`heat-toggle ${heatOn ? 'on' : ''}`}
             onClick={() => setHeatOn(o => !o)}
@@ -2153,6 +2190,7 @@ function DbTable({ entityType, state, room, onEmit, onJump, jumpHighlight, showD
               <tr
                 key={r._anchor}
                 ref={vIdx === 0 ? firstRowRef : undefined}
+                className={r._archived ? 'row-archived' : undefined}
                 onDoubleClick={(e) => {
                   // Skip when the dblclick is aimed at a control that has its
                   // own click behavior — link pills, select chips, the inline
@@ -2243,7 +2281,7 @@ function DbTable({ entityType, state, room, onEmit, onJump, jumpHighlight, showD
               <tr aria-hidden="true" className="virt-spacer"><td colSpan={spacerCols} style={{ height: padBottom, padding: 0, border: 0 }} /></tr>
             )}
 
-            {displayRows.length === 0 && rows.length > 0 && (
+            {displayRows.length === 0 && activeRows.length > 0 && (
               <tr className="tv-no-match">
                 <td className="cell" colSpan={allCols.length + 2} style={{textAlign:'center',padding:'14px',color:'var(--text-faint)',fontStyle:'italic'}}>
                   no rows match the active filter{filters.length !== 1 ? 's' : ''} ·{' '}
@@ -2251,9 +2289,17 @@ function DbTable({ entityType, state, room, onEmit, onJump, jumpHighlight, showD
                 </td>
               </tr>
             )}
+            {activeRows.length === 0 && rows.length > 0 && (
+              <tr className="tv-no-match">
+                <td className="cell" colSpan={allCols.length + 2} style={{textAlign:'center',padding:'14px',color:'var(--text-faint)',fontStyle:'italic'}}>
+                  every {entityType} row is archived ·{' '}
+                  <button className="tv-inline-link" onClick={() => setShowArchived(true)}>show archived</button>
+                </td>
+              </tr>
+            )}
 
             {/* Heat-map summary row */}
-            {heatOn && rows.length > 0 && (
+            {heatOn && activeRows.length > 0 && (
               <tr className="heat-summary">
                 <td className="cell row-expand-spacer" aria-hidden="true"></td>
                 {showFormula && <td className="cell" style={{fontSize:11,color:'var(--text-dim)',textTransform:'uppercase',letterSpacing:'1.2px',fontWeight:700}}>avg writes</td>}
@@ -2281,7 +2327,7 @@ function DbTable({ entityType, state, room, onEmit, onJump, jumpHighlight, showD
                 {showFormula && <td className="cell anchor add-row-gutter"><span className="add-row-plus">+</span></td>}
                 <td className="cell add-row-cell" colSpan={visibleCols.length + (showPartitionCol ? 1 : 0) + visibleLinkedTypes.length + 1}>
                   {!showFormula && <span className="add-row-plus">+</span>}
-                  <span className="add-row-hint">{rows.length === 0 ? `add the first ${entityType} row` : 'add row'}</span>
+                  <span className="add-row-hint">{activeRows.length === 0 ? `add the first ${entityType} row` : 'add row'}</span>
                 </td>
               </tr>
             )}
@@ -2383,6 +2429,7 @@ function DbTable({ entityType, state, room, onEmit, onJump, jumpHighlight, showD
             onClose={() => setDetailAnchor(null)}
             onCommitCell={commitCell}
             onCommitPartition={commitPartition}
+            onArchive={setArchived}
             onAddOption={addFieldOption}
             onJump={onJump}
             onSelectRecord={setDetailAnchor}

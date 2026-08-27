@@ -550,6 +550,7 @@ input:focus,textarea:focus,select:focus{border-color:#000;box-shadow:inset 0 0 0
 .rd-close{width:24px;height:24px;margin-left:4px;display:inline-flex;align-items:center;justify-content:center;background:transparent;border:1px solid transparent;color:var(--text-dim);cursor:pointer;font-size:18px;line-height:1;font-family:var(--mono)}
 .rd-close:hover{color:#000;border-color:var(--border-strong)}
 .rd-title{margin:10px 0 4px;font-size:18px;font-weight:700;color:var(--text-bright);line-height:1.25;letter-spacing:.2px;word-break:break-word}
+.rd-archived-tag{display:inline-block;margin-left:8px;padding:2px 6px;background:var(--signal);color:#fff;font-size:10px;font-weight:700;text-transform:lowercase;letter-spacing:.4px;font-family:var(--mono);vertical-align:middle;border-radius:2px}
 .rd-anchor{display:block;font-size:10.5px;color:var(--text-dim);word-break:break-all}
 .rd-body{flex:1;overflow-y:auto;padding:6px 16px 16px}
 .rd-field{padding:11px 0;border-bottom:1px solid var(--border)}
@@ -568,9 +569,12 @@ input:focus,textarea:focus,select:focus{border-color:#000;box-shadow:inset 0 0 0
 .rd-textarea{min-height:90px;resize:vertical;line-height:1.5}
 .rd-links{margin-top:2px}
 .rd-empty-state{padding:24px 4px;text-align:center;color:var(--text-faint);font-style:italic;font-size:12px}
-.rd-foot{padding:12px 16px;border-top:1px solid var(--border-strong);background:var(--surface-2)}
+.rd-foot{padding:12px 16px;border-top:1px solid var(--border-strong);background:var(--surface-2);display:flex;flex-direction:column;gap:8px}
 .rd-timeline-btn{width:100%;padding:8px 12px;background:#000;color:#fff;border:1px solid #000;font-family:var(--mono);font-size:12px;font-weight:700;text-transform:lowercase;letter-spacing:.3px;cursor:pointer}
 .rd-timeline-btn:hover{background:var(--accent-dim)}
+.rd-archive-btn{width:100%;padding:7px 12px;background:#fff;color:var(--text-bright);border:1px solid var(--border-strong);font-family:var(--mono);font-size:11.5px;font-weight:700;text-transform:lowercase;letter-spacing:.3px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:4px}
+.rd-archive-btn:hover{background:var(--surface-3)}
+.rd-archive-btn.is-archived{background:var(--signal);color:#fff;border-color:var(--signal)}
 
 /* ── Detail-panel toolbar: view picker, customize, fullscreen ───────────── */
 .rd-tool-btn{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 7px;background:#fff;border:1px solid var(--border-strong);color:var(--text-bright);font-family:var(--mono);font-size:10.5px;line-height:1;cursor:pointer;max-width:160px}
@@ -655,6 +659,8 @@ table.dbgrid thead th.unschematized .ty{color:var(--signal)}
 table.dbgrid thead th.unschematized:before{content:'? ';color:var(--signal)}
 table.dbgrid tbody tr:hover{background:var(--surface-2)}
 table.dbgrid tbody tr:last-child td{border-bottom:none}
+table.dbgrid tbody tr.row-archived{opacity:.5}
+table.dbgrid tbody tr.row-archived:hover{opacity:.75}
 table.dbgrid td.anchor{color:var(--text-bright);font-weight:600}
 table.dbgrid td.null{color:var(--text-faint);font-style:italic}
 table.dbgrid td.num{color:var(--triad-existence);text-align:right;font-weight:600}
