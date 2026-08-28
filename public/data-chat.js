@@ -93,15 +93,23 @@
   }
 
   // ── schema introspection (over live fold state) ───────────────────────────
+  // The sets a question may be answered from. Two kinds are excluded, for the
+  // same reason: they aren't part of the user's data model. Internal types are
+  // `_`-prefixed (drive documents and folders, synthesis rollups) and never
+  // appear as sets anywhere else either; archived sets were deliberately put
+  // out of the way, and a set hidden from the rail answering questions is the
+  // same surprise as one that reappears in it.
   function knownTypes(state) {
+    const hidden = new Set(window.MatrixEngine?.archivedSets?.(state) || []);
+    const visible = (list) => list.filter(t => t && !t.startsWith('_') && !hidden.has(t));
     const idx = stateIndex(state);
     const fromSchema = Array.isArray(state?.schema?.tables) ? state.schema.tables : [];
     if (idx) {
-      if (!idx.known) idx.known = uniq([...fromSchema, ...idx.byType.keys()]);
+      if (!idx.known) idx.known = visible(uniq([...fromSchema, ...idx.byType.keys()]));
       return idx.known;
     }
     const fromData = uniq(Object.values(state?.entities || {}).map(e => e._type).filter(Boolean));
-    return uniq([...fromSchema, ...fromData]);
+    return visible(uniq([...fromSchema, ...fromData]));
   }
 
   // Field defs for a type: schema first, then any plain keys observed on records.

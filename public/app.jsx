@@ -1330,6 +1330,16 @@ function App() {
     () => setExportingSchema(true),
     []
   );
+  // Archiving a set is a schema DEF, exactly like a row's `_archived` write:
+  // nothing leaves the log, the set just stops showing in the default list.
+  const onArchiveSetCb = useCallback((name, archived) => {
+    const ME = window.MatrixEngine;
+    onEmitRef.current(ME.OP.DEF, {
+      anchor: null,
+      path: '_schema.archived',
+      value: ME.withArchivedSet(stateRef.current, name, archived),
+    });
+  }, []);
   const onCreateTableCb = useCallback((name) => {
     const ME = window.MatrixEngine;
     const existing = stateRef.current.schema?.tables || [];
@@ -1755,6 +1765,7 @@ function App() {
           selection={selection}
           setSelection={setSelection}
           onExportSchema={onExportSchemaCb}
+          onArchiveSet={onArchiveSetCb}
           onCreateView={createView}
           onRenameView={renameView}
           onDuplicateView={duplicateView}

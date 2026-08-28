@@ -111,7 +111,19 @@ function buildSets(state) {
     });
   }
 
-  return { sets, meta, raw };
+  // Archived sets are pulled out of the main list, not dropped: they keep
+  // their rows, their views, and their place in the log. `_schema.archived`
+  // is the only thing that changed (see engine.js).
+  const archivedNames = new Set(window.MatrixEngine?.archivedSets?.(state) || []);
+  const archived = [];
+  for (let i = sets.length - 1; i >= 0; i--) {
+    if (!archivedNames.has(sets[i].id)) continue;
+    const [set] = sets.splice(i, 1);
+    set.archived = true;
+    archived.unshift(set);
+  }
+
+  return { sets, meta, raw, archived };
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -333,9 +345,10 @@ function Sidebar({
   room, state, selection, setSelection, onCreateTable,
   onCreateView, onRenameView, onDuplicateView, onDeleteView,
   eventsTotal, ephemeralsCount, onRenameRoom, lastEventTs,
-  onExportSchema, syncOutOfDate, syncByTable, myUserId,
+  onExportSchema, onArchiveSet, syncOutOfDate, syncByTable, myUserId,
 }) {
-  const { sets, meta, raw } = useMemo(() => buildSets(state), [state]);
+  const { sets, meta, raw, archived: archivedSets } = useMemo(() => buildSets(state), [state]);
+  const [showArchived, setShowArchived] = useState(false);
   // Files live outside the set list (their `_`-prefixed types are filtered out
   // of buildSets), so the drive gets its own count.
   const driveCount = useMemo(
@@ -454,6 +467,17 @@ function Sidebar({
               style={{ border: 'none', background: 'none', cursor: 'pointer', padding: '0 6px', opacity: isSchemaActive ? 1 : 0.55 }}
             >⊢</button>
           )}
+          {t.kind !== 'meta' && onArchiveSet && (
+            <button
+              className="sb-table-archive"
+              onClick={(e) => { e.stopPropagation(); onArchiveSet(t.id, !t.archived); }}
+              title={t.archived
+                ? 'restore this set to the list'
+                : 'archive · hide this set from the list without deleting anything from the log'}
+            >
+              <i className={`ph ph-${t.archived ? 'arrow-counter-clockwise' : 'archive'}`} aria-hidden="true"></i>
+            </button>
+          )}
         </div>
         {open && (
           <div className="sb-slices">
@@ -499,7 +523,7 @@ function Sidebar({
     );
   }
 
-  const setsCount = allSets.length + rawSets.length;
+  const setsCount = allSets.length + rawSets.length;   // archived sets sit outside the count
   const lastEditLabel = relativeTime(lastEventTs);
   const headerName = room?.title || 'untitled workspace';
 
@@ -578,6 +602,20 @@ function Sidebar({
         {allSets.map(renderSet)}
         {allSets.length === 0 && (
           <div className="sb-empty">no sets yet</div>
+        )}
+        {archivedSets.length > 0 && (
+          <div className="sb-archived">
+            <button
+              className={`sb-archived-head ${showArchived ? 'on' : ''}`}
+              onClick={() => setShowArchived(o => !o)}
+              title="archived sets keep their rows and views — they're just out of the way"
+            >
+              <span className={`sb-caret ${showArchived ? 'open' : ''}`}>▸</span>
+              <span>archived</span>
+              <span className="sb-archived-count">{archivedSets.length}</span>
+            </button>
+            {showArchived && archivedSets.map(renderSet)}
+          </div>
         )}
         {onExportSchema && allSets.length > 0 && (
           <button
