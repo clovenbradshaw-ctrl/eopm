@@ -44,13 +44,36 @@ function clearDemoStore() {
   try { localStorage.removeItem(DEMO_STORE_KEY); } catch {}
 }
 
+// Event ids are `$evt_<hex counter>`, and the counter used to always start
+// at 1000 on every mount — fine within one session, but the persisted log
+// outlives the session. The next reload re-issued ids from 1000 again,
+// colliding with real ids already sitting in the room's committed log. The
+// fold's exactly-once dedup (state._applied, keyed by event_id) then saw
+// those collided ids as already-applied and silently dropped the new
+// events — no violation, no error, the entity just never appeared. Resuming
+// from one past the highest counter already present in the loaded store
+// keeps ids unique across reloads instead of restarting the sequence.
+function initialEventCounter(byRoom) {
+  let max = 999;
+  for (const events of Object.values(byRoom || {})) {
+    for (const e of events) {
+      const m = /^\$evt_([0-9a-f]+)$/i.exec(e?.event_id || '');
+      if (!m) continue;
+      const n = parseInt(m[1], 16);
+      if (Number.isFinite(n) && n > max) max = n;
+    }
+  }
+  return max + 1;
+}
+
 function useEventStore(initialDemo) {
   const [byRoom, setByRoom] = useState(() => {
     const saved = loadDemoStore();
     if (saved) return saved.byRoom;
     return initialDemo ? buildSeedMap() : { '!scratch': [] };
   });
-  const counterRef = useRef(1000);
+  const counterRef = useRef(null);
+  if (counterRef.current === null) counterRef.current = initialEventCounter(byRoom);
 
   function emit(roomId, op, content, sender) {
     const id = `$evt_${(counterRef.current++).toString(16)}`;
