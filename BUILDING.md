@@ -185,6 +185,37 @@ limit less some headroom, grown if a manifest would otherwise outgrow a single
 64 KB event. `test/media-chunk.test.mjs` covers the split arithmetic and the
 byte-exact round trip.
 
+**Audio transcribes in the tab, and the text jumps back into the audio.**
+There is no server to run Whisper on (this app has none — see the README's
+whole pitch), so `src/transcribe.js` + `src/transcribe-worker.js` run it
+client-side via `@huggingface/transformers`. The split matters: decoding the
+file to mono 16kHz PCM (the Web Audio API's `decodeAudioData` +
+`OfflineAudioContext` resampling — the browser equivalent of the media
+chunking section's own `ffmpeg -ar 16000 -ac 1`) happens on the **main
+thread**, because that decoder isn't reliably available inside a Worker; the
+model download and the actual inference — the slow, blocking part — happen
+**in the Worker**, so transcribing a long recording never freezes the tab.
+Model weights come from Hugging Face's CDN on first use (the one network
+dependency this adds, no different in kind from `data-chat.js`'s own lazy
+load of the Cleo engine); the audio bytes themselves never leave the browser.
+
+Deliberately full precision (`dtype: 'fp32'`), not left to the library's
+per-model default — two reasons landed on the same setting. Forced 8-bit
+quantization is a known cause of Whisper producing repeated garbage output
+("we're going to say we're going to say…"), and separately, measured live
+against `onnx-community/whisper-base`: leaving `dtype` unset resolves to a
+mixed-precision decoder file missing a scale tensor ONNX Runtime needs, so it
+refuses to create a session at all. `fp32` sidesteps both failure modes the
+same way — no quantized weights, so neither bug's precondition exists.
+
+The transcript is a `DEF <docAnchor> transcript {text, chunks, model,
+transcribedAt}` — a log fact like any other field, so it replays,
+time-travels, and shows up instantly on reopen with no re-transcription.
+`chunks` is `[{text, start, end}]`, seconds into the audio; the drive's audio
+preview renders each chunk as a clickable span that sets the `<audio>`
+element's `currentTime` and highlights in step with playback via
+`timeupdate` — read straight off the log fact, not local component state.
+
 ### Imported data is permanent: the media-store block chain
 
 Where imported rows actually live, and why they survive anything short of

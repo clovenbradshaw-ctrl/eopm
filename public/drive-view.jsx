@@ -332,13 +332,127 @@ function TextDoc({ doc }) {
   );
 }
 
+function fmtTime(s) {
+  if (s == null || !isFinite(s)) return '';
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}:${String(sec).padStart(2, '0')}`;
+}
+
+function transcribeStatusLabel(p) {
+  if (!p) return 'transcribing…';
+  if (p.status === 'decoding') return 'decoding audio…';
+  if (p.status === 'downloading') return `downloading speech model… ${p.pct != null ? p.pct + '%' : ''}`.trim();
+  if (p.status === 'transcribing') return 'transcribing…';
+  return 'starting…';
+}
+
+/**
+ * The transcript panel under an audio player: a "transcribe" button before
+ * one exists, then clickable segments that seek the SAME <audio> element
+ * the player above it controls (`audioRef`, shared with the caller) and
+ * highlight in step with playback. The transcript itself is just another
+ * DEF on the document — read straight off `doc.transcript`, not local
+ * state — so it's already there on reopen, already synced to every
+ * collaborator, and already time-travels with the rest of the log.
+ */
+function AudioTranscript({ doc, ctx, audioRef }) {
+  const drive = D();
+  const [busy, setBusy] = useState(null);
+  const [error, setError] = useState(null);
+  const [activeIdx, setActiveIdx] = useState(-1);
+  const transcript = doc.transcript;
+  const chunks = Array.isArray(transcript?.chunks) ? transcript.chunks : [];
+
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el || !chunks.length) return;
+    function onTime() {
+      const t = el.currentTime;
+      setActiveIdx(chunks.findIndex(c => c.start != null && c.end != null && t >= c.start && t < c.end));
+    }
+    el.addEventListener('timeupdate', onTime);
+    return () => el.removeEventListener('timeupdate', onTime);
+  }, [audioRef, chunks]);
+
+  async function runTranscribe() {
+    if (!window.Transcribe?.isSupported?.()) {
+      setError('this browser can\'t transcribe audio here (no Web Audio / Worker support)');
+      return;
+    }
+    setError(null);
+    setBusy({ status: 'starting' });
+    try {
+      const bytes = await readBytes(doc.file);
+      if (!bytes) throw new Error('the audio bytes are not available on this device');
+      const result = await window.Transcribe.transcribeAudio(bytes, doc.mime, { onProgress: setBusy });
+      await drive.attachTranscript(ctx, doc._anchor, {
+        text: result.text,
+        chunks: result.chunks,
+        model: 'onnx-community/whisper-base',
+        transcribedAt: new Date().toISOString(),
+      });
+    } catch (e) {
+      setError(e?.message || String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function jump(chunk) {
+    const el = audioRef.current;
+    if (!el || chunk.start == null) return;
+    el.currentTime = chunk.start;
+    el.play().catch(() => {});
+  }
+
+  if (!transcript) {
+    return (
+      <div className="dv-transcript dv-transcript-empty">
+        <button className="dv-btn ghost" onClick={runTranscribe} disabled={!!busy}>
+          <i className="ph ph-waveform" aria-hidden="true"></i>
+          {busy ? transcribeStatusLabel(busy) : 'transcribe'}
+        </button>
+        {!busy && !error && (
+          <span className="dv-transcript-hint">runs in this tab · downloads a speech model on first use</span>
+        )}
+        {error && <div className="dv-error">{error}</div>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="dv-transcript">
+      <div className="dv-transcript-head">
+        <span>transcript</span>
+        <button className="dv-icon-btn" onClick={runTranscribe} disabled={!!busy} title="re-transcribe">
+          <i className="ph ph-arrow-clockwise" aria-hidden="true"></i>
+        </button>
+      </div>
+      {busy && <div className="dv-progress"><span className="dv-progress-label">{transcribeStatusLabel(busy)}</span></div>}
+      {error && <div className="dv-error">{error}</div>}
+      <div className="dv-transcript-body">
+        {chunks.length ? chunks.map((c, i) => (
+          <span
+            key={i}
+            className={`dv-transcript-chunk ${i === activeIdx ? 'active' : ''} ${c.start == null ? 'no-time' : ''}`}
+            onClick={() => jump(c)}
+            title={c.start != null ? `jump to ${fmtTime(c.start)}` : 'no timestamp for this segment'}
+          >{c.text} </span>
+        )) : <span className="dv-transcript-chunk no-time">{transcript.text}</span>}
+      </div>
+    </div>
+  );
+}
+
 /** Full-screen preview of one document, with download + the record backlinks. */
-function DocPreviewModal({ doc, state, onClose, onJumpRecord }) {
+function DocPreviewModal({ doc, state, ctx, onClose, onJumpRecord }) {
   const drive = D();
   const viewer = drive.viewerFor(doc);
   // Only the media viewers need an object URL; the parsers work off raw bytes.
   const needsUrl = viewer === 'image' || viewer === 'pdf' || viewer === 'video' || viewer === 'audio';
   const { url, state: loadState } = useObjectUrl(doc, needsUrl);
+  const audioRef = useRef(null);
 
   useEffect(() => {
     function esc(e) { if (e.key === 'Escape') onClose(); }
@@ -368,7 +482,12 @@ function DocPreviewModal({ doc, state, onClose, onJumpRecord }) {
     if (viewer === 'image') return <img className="dv-preview-img" src={url} alt={doc.name} />;
     if (viewer === 'pdf') return <iframe className="dv-preview-frame" src={url} title={doc.name} />;
     if (viewer === 'video') return <video className="dv-preview-img" src={url} controls />;
-    return <audio className="dv-preview-audio" src={url} controls />;
+    return (
+      <div className="dv-audio-wrap">
+        <audio ref={audioRef} className="dv-preview-audio" src={url} controls />
+        {ctx && <AudioTranscript doc={doc} ctx={ctx} audioRef={audioRef} />}
+      </div>
+    );
   }
 
   // Parsed documents scroll as a page; media centers in the frame.
@@ -558,6 +677,8 @@ function DriveView({ room, state, onEmit, scrubber, session, setSelection }) {
   const [renameDraft, setRenameDraft] = useState('');
   const [expanded, setExpanded] = useState(() => new Set());
   const [showTrash, setShowTrash] = useState(false);
+  const [railOpen, setRailOpen] = useState(false); // mobile: folder rail as a drawer
+  useEffect(() => { setRailOpen(false); }, [folder, showTrash]);
   const [progress, setProgress] = useState(null);  // {done,total,name}
   const [error, setError] = useState(null);
   const [dragOver, setDragOver] = useState(false);
@@ -701,7 +822,8 @@ function DriveView({ room, state, onEmit, scrubber, session, setSelection }) {
       </div>
 
       <div className="dv-body">
-        <nav className="dv-rail">
+        {railOpen && <div className="offcanvas-backdrop" onClick={() => setRailOpen(false)} />}
+        <nav className={`dv-rail ${railOpen ? 'open' : ''}`}>
           <div
             className={`dv-tree-row root ${folder === null && !showTrash ? 'active' : ''}`}
             onClick={() => openFolder(null)}
@@ -746,6 +868,12 @@ function DriveView({ room, state, onEmit, scrubber, session, setSelection }) {
           onDrop={onDropFiles}
         >
           <div className="dv-toolbar">
+            <button
+              className="dv-rail-toggle"
+              onClick={() => setRailOpen(o => !o)}
+              title="browse folders"
+              aria-label="browse folders"
+            ><i className="ph ph-folders" aria-hidden="true"></i></button>
             <div className="dv-crumbs">
               {showTrash ? (
                 <span className="dv-crumb current">trash</span>
@@ -984,6 +1112,7 @@ function DriveView({ room, state, onEmit, scrubber, session, setSelection }) {
         <DocPreviewModal
           doc={drive.getDoc(state, previewing)}
           state={state}
+          ctx={ctx}
           onClose={() => setPreviewing(null)}
           onJumpRecord={jumpToRecord}
         />
@@ -1156,6 +1285,7 @@ function AttachmentControl({ state, record, field, onEmit, wrapTd, compact }) {
         <DocPreviewModal
           doc={drive.getDoc(state, previewing)}
           state={state}
+          ctx={ctx}
           onClose={() => setPreviewing(null)}
         />
       )}

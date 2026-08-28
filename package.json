@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@babel/standalone": "^7.29.0",
+    "@huggingface/transformers": "^4.2.0",
     "matrix-js-sdk": "^41.5.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"

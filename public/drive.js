@@ -233,6 +233,17 @@
     return anchor;
   }
 
+  /**
+   * A Whisper transcript, DEF'd onto the document like any other field —
+   * so it replays, syncs, and time-travels the same way the document
+   * itself does. `chunks` is `[{text, start, end}]`, seconds into the
+   * audio; a chunk Whisper didn't timestamp carries `start`/`end` null.
+   */
+  async function attachTranscript(ctx, docAnchor, transcript) {
+    const { emit, ME } = ctx;
+    await emit(ME.OP.DEF, { anchor: docAnchor, path: 'transcript', value: transcript });
+  }
+
   function renameEntity(ctx, anchor, name) {
     const { emit, ME } = ctx;
     emit(ME.OP.DEF, { anchor, path: 'name', value: name });
@@ -402,7 +413,7 @@
     isTrashed, allDocs, allFolders, getDoc, docsIn, foldersIn,
     folderPath, wouldCycle, descendantFolders,
     attachmentFields, anchorsInCell, usageIndex, recordLabel,
-    createFolder, createDoc, renameEntity, moveDoc, moveFolder, trash, restore,
+    createFolder, createDoc, attachTranscript, renameEntity, moveDoc, moveFolder, trash, restore,
     attach, detach, resolveCell,
     kindOf, iconFor, viewerFor, isPreviewable, fmtBytes, uniqueName,
     version: 1,
