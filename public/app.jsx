@@ -942,12 +942,16 @@ function App() {
   // re-syncs. Collect the dead mxcs (excluding any still referenced by a live
   // generation) so the sync page can reclaim that disk on demand.
   const reclaimableMedia = useMemo(() => {
-    const activeMxc = new Set(importEntities.map(e => e.file?.mxc).filter(Boolean));
+    // A big import is stored as ordered parts, so a source can own several
+    // mxcs; mxcsOf flattens both shapes to the list that has to be reclaimed.
+    const mxcsOf = window.MatrixLive?.mxcsOf
+      || ((ref) => (ref?.mxc ? [ref.mxc] : []));
+    const activeMxc = new Set(importEntities.flatMap(e => mxcsOf(e.file)));
     const dead = new Set();
     for (const e of Object.values(state.entities || {})) {
-      if (e?._type === 'import' && e.file?.mxc &&
-          !activeImportAnchors.has(e._anchor) && !activeMxc.has(e.file.mxc)) {
-        dead.add(e.file.mxc);
+      if (e?._type !== 'import' || activeImportAnchors.has(e._anchor)) continue;
+      for (const mxc of mxcsOf(e.file)) {
+        if (!activeMxc.has(mxc)) dead.add(mxc);
       }
     }
     return Array.from(dead);

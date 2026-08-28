@@ -391,11 +391,6 @@ function SyncView({
             </div>
           </div>
 
-          {/* ── Airtable two-way sync (shared token · push · raise-hand pull) ── */}
-          {window.AirtableSyncPanel && (
-            <window.AirtableSyncPanel room={room} session={session} />
-          )}
-
           {/* ── Tables ── */}
           <div className="page-section">
             <div className="page-section-head">

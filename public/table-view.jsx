@@ -860,6 +860,7 @@ function orderDetailCols(cols, order) {
 function RecordDetailPanel({
   record, records, entityType, room, cols, partitioned, linkedTypes, state, selectOptions,
   onClose, onCommitCell, onCommitPartition, onAddOption, onJump, onSelectRecord, onViewTimeline, onArchive,
+  onEmit,
   recordViews, activeViewId, onSelectView, onCreateView, onUpdateView, onDeleteView, onRenameView,
   fullscreen, onToggleFullscreen,
 }) {
@@ -1140,6 +1141,19 @@ function RecordDetailPanel({
                 <div className="rd-field" key={c.name}>
                   <label className="rd-label"><span className="rd-fglyph">ƒ</span> {c.name} <span className="rd-type">rollup</span></label>
                   <div className="rd-value rd-derived">{text}</div>
+                </div>
+              );
+            }
+            if (c.type === 'attachment') {
+              return (
+                <div className="rd-field" key={c.name}>
+                  <label className="rd-label">{c.name} <span className="rd-type">attachment</span></label>
+                  <window.AttachmentControl
+                    state={state}
+                    record={record}
+                    field={c.name}
+                    onEmit={onEmit}
+                  />
                 </div>
               );
             }
@@ -2239,7 +2253,17 @@ function DbTable({ entityType, state, room, onEmit, onJump, jumpHighlight, showD
                   />
                 ))}
                 {visibleCols.map((c, cIdx) => (
-                  c.type === 'formula' ? (
+                  c.type === 'attachment' ? (
+                    <window.AttachmentControl
+                      key={c.name}
+                      wrapTd
+                      state={state}
+                      record={r}
+                      field={c.name}
+                      onEmit={onEmit}
+                      compact
+                    />
+                  ) : c.type === 'formula' ? (
                     <FormulaCell key={c.name} formula={c.formula} record={r} state={state} />
                   ) : c.type === 'rollup' ? (
                     <RollupCell key={c.name} rollup={c.rollup} record={r} state={state} />
@@ -2429,6 +2453,7 @@ function DbTable({ entityType, state, room, onEmit, onJump, jumpHighlight, showD
             onClose={() => setDetailAnchor(null)}
             onCommitCell={commitCell}
             onCommitPartition={commitPartition}
+            onEmit={onEmit}
             onArchive={setArchived}
             onAddOption={addFieldOption}
             onJump={onJump}
@@ -2451,7 +2476,7 @@ function DbTable({ entityType, state, room, onEmit, onJump, jumpHighlight, showD
 }
 
 function sqlType(t) {
-  return { text: 'TEXT', number: 'INTEGER', boolean: 'BOOLEAN', json: 'JSONB', select: 'TEXT', multiselect: 'TEXT[]', longtext: 'TEXT', date: 'TIMESTAMP', url: 'TEXT', email: 'TEXT', partition: 'TEXT', linked: 'LINK', formula: 'FORMULA' }[t] || 'TEXT';
+  return { text: 'TEXT', number: 'INTEGER', boolean: 'BOOLEAN', json: 'JSONB', select: 'TEXT', multiselect: 'TEXT[]', longtext: 'TEXT', date: 'TIMESTAMP', url: 'TEXT', email: 'TEXT', partition: 'TEXT', linked: 'LINK', formula: 'FORMULA', attachment: 'TEXT[]' }[t] || 'TEXT';
 }
 
 // Short docs for the most commonly used functions (used by the autocomplete
@@ -2812,6 +2837,7 @@ const FIELD_TYPES = [
   { value: 'url',         label: 'url',          icon: 'link',            hint: 'validated http(s)'   },
   { value: 'email',       label: 'email',        icon: 'envelope',        hint: 'validated address'   },
   { value: 'json',        label: 'json',         icon: 'brackets-curly',  hint: 'arbitrary structured'},
+  { value: 'attachment',  label: 'attachment',   icon: 'paperclip',       hint: 'files from the drive — removing one here leaves it in the drive' },
   { value: 'formula',     label: 'formula',      icon: 'function',        hint: 'read-only · e.g. RECORD_ID() or UPPER({Name})' },
   { value: 'rollup',      label: 'rollup',       icon: 'sigma',           hint: 'aggregate values across linked records (sum / count / avg / …)' },
 ];

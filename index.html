@@ -1807,7 +1807,10 @@ table.csv-preview tr:last-child td{border-bottom:none}
 .dv-btn:disabled{opacity:.4;cursor:not-allowed}
 .dv-icon-btn{border:1px solid var(--border);width:26px;height:26px;display:inline-flex;align-items:center;justify-content:center;color:var(--text-dim);font-size:12px;flex:0 0 auto}
 .dv-icon-btn:hover{border-color:var(--border-bright);color:var(--text-bright)}
-.dv-progress{padding:6px 14px;background:var(--accent-glow);border-bottom:1px solid var(--border);font-size:11.5px;color:var(--text-dim)}
+.dv-progress{padding:6px 14px;background:var(--accent-glow);border-bottom:1px solid var(--border);font-size:11.5px;color:var(--text-dim);display:flex;align-items:center;gap:10px}
+.dv-progress-label{flex:0 0 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:60%}
+.dv-progress-bar{flex:1;height:5px;background:var(--surface-3);min-width:60px}
+.dv-progress-fill{display:block;height:100%;background:var(--accent);transition:width .18s linear}
 .dv-error{padding:6px 14px;background:#fdf0c4;border-bottom:1px solid var(--signal);font-size:11.5px;color:var(--signal)}
 
 /* listing */
