@@ -154,9 +154,9 @@ function saveLastView(user, roomId, selection) {
 function validSavedSelection(sel) {
   if (!sel || typeof sel !== 'object') return false;
   if (sel.kind === 'log' || sel.kind === 'sync' || sel.kind === 'chat' ||
-      sel.kind === 'drive' || sel.kind === 'watching') return true;
+      sel.kind === 'drive' || sel.kind === 'watching' || sel.kind === 'void') return true;
   if (sel.kind !== 'slice') return false;
-  return ['table', 'schema', 'kanban', 'notebook', 'graph', 'timeline'].includes(sel.sliceKind);
+  return ['table', 'schema', 'kanban', 'notebook', 'graph', 'timeline', 'iteration'].includes(sel.sliceKind);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1980,6 +1980,16 @@ function App() {
               }}
             />
           )}
+          {selection.kind === 'void' && (
+            <window.VoidView
+              room={currentRoom}
+              state={renderState}
+              onEmit={onEmit}
+              scrubber={scrubberEl}
+              setSelection={setSelection}
+              myUserId={session?.mxid}
+            />
+          )}
           {selection.kind === 'chat' && (
             <window.ChatView
               room={currentRoom}
@@ -2053,6 +2063,19 @@ function App() {
           )}
           {selection.kind === 'slice' && selection.sliceKind === 'timeline' && (
             <window.EntityTimelineView
+              room={currentRoom}
+              state={renderState}
+              entityType={selection.tableId}
+              entityAnchor={selection.entityAnchor}
+              scrubber={scrubberEl}
+              allEventsInRoom={allEvents}
+              setSelection={setSelection}
+              onEmit={onEmit}
+              myUserId={session?.mxid}
+            />
+          )}
+          {selection.kind === 'slice' && selection.sliceKind === 'iteration' && (
+            <window.IterationView
               room={currentRoom}
               state={renderState}
               entityType={selection.tableId}

@@ -560,6 +560,15 @@ function Sidebar({
       </div>
 
       <button
+        className={`sb-ask sb-void ${selection.kind === 'void' ? 'active' : ''}`}
+        onClick={() => setSelection({ kind: 'void' })}
+        title="the Void — capture a stray thought with zero structural decisions, promote it to a real entity when it earns it"
+      >
+        <i className="ph ph-circle-dashed" aria-hidden="true"></i>
+        <span className="sb-ask-label">the Void</span>
+      </button>
+
+      <button
         className={`sb-ask ${selection.kind === 'chat' ? 'active' : ''}`}
         onClick={() => setSelection({ kind: 'chat' })}
         title="chat with your data — ask in plain language, get tables and record profiles linked by foreign key"
