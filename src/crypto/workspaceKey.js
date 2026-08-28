@@ -210,6 +210,66 @@ export async function grantWorkspaceKey(client, namespace, roomId, wck) {
 }
 
 /**
+ * Export the room's WCK as base64, for putting into a share link's URL
+ * fragment.
+ *
+ * This is a **read capability for the whole workspace** — anyone holding
+ * these bytes decrypts the block chain, member or not. It exists because
+ * the alternative strands a newly invited guest: Matrix auth rules mean
+ * only they can publish their own `member_key`, so nobody can pre-grant
+ * to an account that has not opened the app yet, and grantWorkspaceKey()
+ * only runs when an existing member next opens the room. Without the key
+ * in the link, a guest's first sight of the workspace is an empty one.
+ *
+ * Callers must treat the result the way the UI copy does: as a key.
+ * Revocation is epoch rotation (ENCRYPTION-DESIGN.md §6).
+ */
+export function exportWorkspaceKeyB64(roomId) {
+  const wck = wckCache.get(roomId);
+  return wck ? b64(wck) : null;
+}
+
+/**
+ * Adopt a WCK handed to us out of band (a share link's fragment) as this
+ * room's key.
+ *
+ * Deliberately does not overwrite a key we already hold: if we have one,
+ * either it is the same key (no-op) or the link is stale/for a different
+ * epoch, and clobbering our working key with it would break reads.
+ *
+ * On adoption we also publish our member_key and self-wrap the key into
+ * our own `<ns>.wkey`, so the next browser wipe recovers it from room
+ * state through the ordinary §3 path rather than needing the link again.
+ * Both are best-effort: a viewer without state power keeps the cached
+ * copy and simply has no server-side recovery point.
+ */
+export async function adoptWorkspaceKeyB64(client, namespace, roomId, keyB64) {
+  if (!keyB64) return null;
+  const existing = wckCache.get(roomId);
+  if (existing) return existing;
+
+  let wck;
+  try {
+    wck = unb64(keyB64);
+    if (wck.length !== 32) throw new Error(`expected 32 key bytes, got ${wck.length}`);
+  } catch (e) {
+    console.warn('[wck] link key is not a workspace key:', e?.message || e);
+    return null;
+  }
+
+  const identity = getIdentity();
+  const userId = identity?.userId || client?.getUserId?.();
+  if (userId) await cacheWck(userId, roomId, wck);
+  else wckCache.set(roomId, wck);
+
+  if (client && identity) {
+    await publishMemberKey(client, namespace, roomId);
+    await selfWrapIfMissing(client, namespace, roomId, wck, identity);
+  }
+  return wck;
+}
+
+/**
  * Pick up a grant another member published for us (counterpart of
  * grantWorkspaceKey): scan every member's wkey state event for a
  * `grants[@me]` entry, unwrap it, cache it, and self-publish our own

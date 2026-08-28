@@ -1,27 +1,34 @@
-/* invite-view.jsx — share access to a project via a link.
+/* invite-view.jsx — share access to a room by link.
  *
- * Two halves of one flow, mirrored from the pattern proven in NPJ's
- * app/admin/Invite.jsx + app/identity/matrix-auth.js, adapted onto this
- * app's own crypto-safe client (src/client.js) instead of a raw-fetch
- * client — a guest's session has to go through the SAME login() path
- * every other user does, or their device never gets Megolm crypto and
- * they can't read or write anything in an encrypted room.
+ * Two halves of one flow.
  *
- *   InvitePanel  — the member-side widget. Two tabs:
- *     "new guest"      mints a fresh account (register(), never touches
- *                       the inviter's own session), invites it into the
- *                       room, sets its power level, hands back one link
- *                       carrying a one-time password (#welcome=…).
- *     "existing member" invites a real mxid the ordinary Matrix way and
- *                       hands back a plain deep link with no secret in it
- *                       (#join=…) — for someone who already has an
- *                       account and just needs a way back into THIS room.
+ *   InvitePanel   — the member side. One field ("who's this for?") and a
+ *     link. Everything else (role, homeserver, registration token) is
+ *     folded under "advanced" because the common case never touches it.
+ *     Two tabs:
+ *       "by link"        mints a fresh account with register() — which
+ *                        runs on a throwaway client and never touches the
+ *                        inviter's own session — invites it into the room,
+ *                        sets its power level, and packages a #welcome=
+ *                        link carrying a one-time password AND the room's
+ *                        workspace key.
+ *       "matrix account" invites a real mxid the ordinary way and hands
+ *                        back a plain deep link with no secret in it
+ *                        (#join=) for someone who signs in as themselves.
  *
- *   WelcomeInvite — what a #welcome= link opens. Logs the guest in with
- *     the temp password, joins them into the room, lets them pick a
- *     name and set their own password. A second visit (temp password
- *     already spent) falls back to a plain sign-in with the password
- *     they chose — so the same link doubles as "get back in".
+ *   WelcomeInvite — what a #welcome= link opens. For a first-time
+ *     recipient this is ONE screen: they confirm what to call them, and
+ *     they are in the room. No account step, no password step, no "save
+ *     this somewhere safe" gate. MatrixLive.claimInvite() does the work
+ *     behind that single button — see main.js for the ordering.
+ *
+ *     The password only ever appears on the paths where it is genuinely
+ *     load-bearing:
+ *       - "returning"  a spent link on a device that doesn't know this
+ *                      account: they need the password they added.
+ *       - "stranded"   ...and never added one. A real dead end, said
+ *                      plainly, because the alternative is a login form
+ *                      that can never succeed.
  *
  * Roles: "editor" is the room's default power level (0) — no override
  * needed. "viewer" is a negative power level, which the homeserver
@@ -29,7 +36,7 @@
  * not a client-side convention that a modified client could ignore.
  */
 (function () {
-const { useState, useEffect, useRef } = React;
+const { useState, useEffect, useMemo } = React;
 
 const ROLE_PL = { viewer: -1, editor: 0 };
 const DEFAULT_HOMESERVER = 'hyphae.social';
@@ -142,6 +149,7 @@ function NewGuestTab({ roomId, roomTitle, session, state, onEmit }) {
   const [homeserver, setHomeserver] = useState(DEFAULT_HOMESERVER);
   const [token, setToken] = useState('');
   const [needToken, setNeedToken] = useState(false);
+  const [advanced, setAdvanced] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [link, setLink] = useState(null);
@@ -155,11 +163,26 @@ function NewGuestTab({ roomId, roomTitle, session, state, onEmit }) {
     if (!who) { setErr("Add a name so everyone knows who this is."); return; }
     setBusy(true); setErr(''); setLink(null); setEmailStatus(null);
     try {
+      // The workspace key first: without it the recipient lands in a room
+      // whose history they can't decrypt until some existing member next
+      // happens to open the app, which reads as a broken invite. Matrix
+      // auth rules stop us pre-granting it — only they can publish their
+      // own member_key — so it has to travel in the link. Not fatal if
+      // it's unavailable; they'd see the workspace from their join
+      // onward, which beats blocking the share.
+      let roomKey = null;
+      try { roomKey = await ML.exportRoomKey(roomId); }
+      catch (e) { console.warn('[invite] no workspace key to share:', e?.message || e); }
+
       const acct = await ML.register(homeserver.trim(), { seed: who, registrationToken: token.trim() || undefined });
       try { await ML.inviteUser(roomId, acct.mxid); } catch (e) { /* best-effort; the link still works once they land */ }
       if (ROLE_PL[role] < 0) { try { await ML.setUserPowerLevel(roomId, acct.mxid, ROLE_PL[role]); } catch (e) {} }
-      const url = ML.buildInviteLink({ v: 1, hs: acct.domain, u: acct.localpart, p: acct.password, r: roomId, rt: roomTitle, n: who, role, by: session?.mxid });
-      setLink({ url, mxid: acct.mxid, name: who }); setNeedToken(false);
+      const url = ML.buildInviteLink({
+        hs: acct.domain, u: acct.localpart, p: acct.password,
+        r: roomId, rt: roomTitle, n: who, role, by: session?.mxid,
+        ...(roomKey ? { k: roomKey } : {}),
+      });
+      setLink({ url, mxid: acct.mxid, name: who, keyed: !!roomKey }); setNeedToken(false);
 
       const to = email.trim();
       if (to && ML.getEmailConfig().canSend) {
@@ -167,7 +190,7 @@ function NewGuestTab({ roomId, roomTitle, session, state, onEmit }) {
         try {
           await ML.sendEmail({
             to, subject: `You're invited to ${roomTitle || 'a project'}`,
-            html: `<p>Hi ${who},</p><p>You've been invited to <b>${roomTitle || 'a project'}</b> as ${role === 'viewer' ? 'a viewer' : 'an editor'}.</p><p><a href="${url}">${url}</a></p><p style="color:#888;font-size:12px">This link logs you straight in — no account setup needed.</p>`,
+            html: `<p>Hi ${who},</p><p>You've been invited to <b>${roomTitle || 'a project'}</b> as ${role === 'viewer' ? 'a viewer' : 'an editor'}.</p><p><a href="${url}">${url}</a></p><p style="color:#888;font-size:12px">Open it and you're in — there's nothing to sign up for.</p>`,
           });
           setEmailStatus('sent');
           // Record the mapping so anyone can reach this person later (the
@@ -179,7 +202,7 @@ function NewGuestTab({ roomId, roomTitle, session, state, onEmit }) {
         } catch (e) { setEmailStatus({ error: e?.message || 'Email failed to send.' }); }
       }
     } catch (e) {
-      if (e && e.code === 'uia' && /registration token/i.test(e.message || '')) { setNeedToken(true); setErr(e.message); }
+      if (e && e.code === 'uia' && /registration token/i.test(e.message || '')) { setNeedToken(true); setAdvanced(true); setErr(e.message); }
       else setErr((e && e.message) || "Couldn't create that account.");
     }
     setBusy(false);
@@ -188,34 +211,52 @@ function NewGuestTab({ roomId, roomTitle, session, state, onEmit }) {
   if (link) return (
     <div>
       <div style={{ fontSize: 11.5, color: 'var(--green)', marginBottom: 8, lineHeight: 1.4 }}>
-        Account created for <b>{link.name}</b> (<code>{link.mxid}</code>) · invited as {role}. Send them this link:
+        Ready for <b>{link.name}</b> · invited as {role}. They open this and they're in — nothing to sign up for.
       </div>
-      <LinkOut url={link.url} note="Carries a one-time password — it stops working once they set their own. Share it privately." />
+      <LinkOut url={link.url}
+        note={link.keyed
+          ? "Treat this like a key, not a notification: it opens the account AND decrypts this workspace's history. Send it privately, to one person."
+          : "Treat this like a key: it signs them straight in. Send it privately, to one person."} />
+      {!link.keyed && (
+        <div style={{ fontSize: 10.5, color: 'var(--text-faint)', marginTop: 8, lineHeight: 1.4 }}>
+          Couldn't attach this workspace's key, so they'll see changes from when they join onward — earlier history fills in the next time you open the app.
+        </div>
+      )}
       {emailStatus === 'sending' && <div style={{ fontSize: 10.5, color: 'var(--text-faint)', marginTop: 8, display: 'flex', alignItems: 'center', gap: 6 }}><Spinner size={10} /> emailing {email}…</div>}
       {emailStatus === 'sent' && <div style={{ fontSize: 10.5, color: 'var(--green)', marginTop: 8 }}><i className="ph ph-check" aria-hidden="true"></i> emailed to {email}</div>}
       {emailStatus?.error && <div style={{ fontSize: 10.5, color: 'var(--red)', marginTop: 8 }}>couldn't email it: {emailStatus.error} — the link above still works.</div>}
-      <button style={{ ...btnStyle(false), marginTop: 10 }} onClick={() => { setLink(null); setEmailStatus(null); }}>invite another</button>
+      <button style={{ ...btnStyle(false), marginTop: 10 }} onClick={() => { setLink(null); setEmailStatus(null); setName(''); }}>share with someone else</button>
     </div>
   );
 
   return (
     <div>
       <div style={{ fontSize: 11, color: 'var(--text-faint)', marginBottom: 10, lineHeight: 1.45 }}>
-        Mints a real account on <b>{homeserver || 'a homeserver'}</b> and gives you one link.
-        They click it, confirm their name, and set a password — no sign-up.
+        One link. They open it, confirm their name, and they're in — no sign-up, no password.
       </div>
       <label style={{ fontSize: 10.5, color: 'var(--text-faint)', display: 'block', marginBottom: 4 }}>who's this for?</label>
       <input value={name} onChange={e => { setName(e.target.value); setErr(''); }} onKeyDown={e => e.key === 'Enter' && create()}
-        placeholder="e.g. Sam Rivera" style={{ ...fieldStyle, marginBottom: 8 }} />
-      <RolePicker role={role} setRole={setRole} />
-      <label style={{ fontSize: 10.5, color: 'var(--text-faint)', display: 'block', marginBottom: 4 }}>homeserver</label>
-      <input value={homeserver} onChange={e => setHomeserver(e.target.value)} placeholder="hyphae.social" style={{ ...fieldStyle, marginBottom: 8 }} />
-      {needToken && (
-        <input value={token} onChange={e => setToken(e.target.value)} placeholder="registration token" style={{ ...fieldStyle, marginBottom: 8 }} />
-      )}
+        placeholder="e.g. Sam Rivera" style={{ ...fieldStyle, marginBottom: 8 }} autoFocus />
       <EmailSendRow email={email} setEmail={setEmail} />
+
+      <button onClick={() => setAdvanced(a => !a)}
+        style={{ background: 'none', border: 'none', padding: 0, marginBottom: advanced ? 8 : 10, cursor: 'pointer', color: 'var(--text-faint)', fontSize: 10.5, display: 'flex', alignItems: 'center', gap: 4 }}>
+        <i className={`ph ph-caret-${advanced ? 'down' : 'right'}`} aria-hidden="true"></i>
+        {role === 'editor' ? 'editor' : 'viewer'} · {homeserver || 'no homeserver'}
+      </button>
+      {advanced && (
+        <div style={{ borderLeft: '2px solid var(--border)', paddingLeft: 10, marginBottom: 10 }}>
+          <RolePicker role={role} setRole={setRole} />
+          <label style={{ fontSize: 10.5, color: 'var(--text-faint)', display: 'block', marginBottom: 4 }}>homeserver</label>
+          <input value={homeserver} onChange={e => setHomeserver(e.target.value)} placeholder="hyphae.social" style={{ ...fieldStyle, marginBottom: needToken ? 8 : 0 }} />
+          {needToken && (
+            <input value={token} onChange={e => setToken(e.target.value)} placeholder="registration token" style={fieldStyle} />
+          )}
+        </div>
+      )}
+
       <button style={btnStyle(true)} disabled={busy} onClick={create}>
-        {busy ? <Spinner /> : <i className="ph ph-link" aria-hidden="true"></i>}{busy ? 'creating…' : 'create invite link'}
+        {busy ? <Spinner /> : <i className="ph ph-link" aria-hidden="true"></i>}{busy ? 'preparing…' : 'create link'}
       </button>
       {err && <div style={{ fontSize: 11, color: 'var(--red)', marginTop: 8, lineHeight: 1.4 }}>{err}</div>}
     </div>
@@ -319,105 +360,57 @@ function InvitePanel({ roomId, roomTitle, session, state, onEmit, onClose }) {
 
 // ─────────────────────────────────────────────────────────────────────────
 // WelcomeInvite — the #welcome= link's landing page
+//
+// Phases:
+//   claiming   the one screen a first-time recipient sees (name → in)
+//   entering   claimInvite() is running
+//   returning  spent link, this device doesn't know the account: they
+//              need the password they added
+//   stranded   ...and there is no password to enter. A dead end, stated
+//              plainly rather than dressed as a login form
+//   expired    the link outlived its TTL
+//   error      anything else
 // ─────────────────────────────────────────────────────────────────────────
 
-function SecureAccountStep({ creds, onEnter }) {
-  const [reveal, setReveal] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [copied, setCopied] = useState('');
-  const copy = async (label, value) => { if (await copyText(value)) { setCopied(label); setTimeout(() => setCopied(c => c === label ? '' : c), 1500); } };
-  const row = (label, value, secret) => {
-    const shown = secret && !reveal ? '•'.repeat(Math.min(16, String(value || '').length || 12)) : (value || '—');
-    return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
-        <span style={{ fontSize: 10.5, color: 'var(--text-faint)', whiteSpace: 'nowrap' }}>{label}</span>
-        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-          <span style={{ fontFamily: 'var(--mono)', fontSize: 12.5, wordBreak: 'break-all' }}>{shown}</span>
-          {secret && <button onClick={() => setReveal(r => !r)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-faint)' }}><i className={`ph ph-${reveal ? 'eye-slash' : 'eye'}`} aria-hidden="true"></i></button>}
-          <button onClick={() => copy(label, value)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: copied === label ? 'var(--green)' : 'var(--text-faint)' }}><i className={`ph ph-${copied === label ? 'check' : 'copy'}`} aria-hidden="true"></i></button>
-        </span>
-      </div>
-    );
-  };
-  return (
-    <>
-      <div style={{ fontSize: 11, color: 'var(--green)', marginBottom: 8 }}>you're a member now · last step</div>
-      <h1 style={{ fontSize: 24, margin: '0 0 8px', fontFamily: 'var(--mono)' }}>Save your password.</h1>
-      <p style={{ fontSize: 13, lineHeight: 1.5, color: 'var(--text-dim)', margin: '0 0 14px' }}>
-        Your account is real and it's yours — but there's no easy reset. The password you just set is the only key. Save it in a password manager (or somewhere safe) before you go in.
-      </p>
-      <div style={{ border: '1px solid var(--border-strong)', padding: '2px 10px', marginBottom: 14 }}>
-        {row('name', creds.displayName, false)}
-        {row('sign-in id', creds.mxid, false)}
-        {row('password', creds.password, true)}
-      </div>
-      <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer', marginBottom: 14, fontSize: 12.5 }}>
-        <input type="checkbox" checked={saved} onChange={e => setSaved(e.target.checked)} style={{ marginTop: 3 }} />
-        I've saved my password somewhere safe — I understand it can't be reset for me.
-      </label>
-      <button style={{ ...btnStyle(true), width: '100%', justifyContent: 'center', opacity: saved ? 1 : .5, cursor: saved ? 'pointer' : 'not-allowed' }} disabled={!saved} onClick={onEnter}>
-        enter the project<i className="ph ph-arrow-right" aria-hidden="true"></i>
-      </button>
-    </>
-  );
-}
-
 function WelcomeInvite({ payload, onDone }) {
-  const [phase, setPhase] = useState('signing'); // signing | returning | name | password | secure | finishing | error
+  const ML = window.MatrixLive;
+  const expired = !!payload.expired;
+  const [phase, setPhase] = useState(expired ? 'expired' : 'claiming');
   const [err, setErr] = useState('');
   const [name, setName] = useState(payload.n || '');
-  const [pw, setPw] = useState('');
-  const [pw2, setPw2] = useState('');
   const [returnPw, setReturnPw] = useState('');
   const [busy, setBusy] = useState(false);
-  const [creds, setCreds] = useState(null);
-  const sessRef = useRef(null);
-  const mxid = '@' + payload.u + ':' + payload.hs;
-  const ML = window.MatrixLive;
+  const device = useMemo(() => (ML?.currentDevice?.() || { device: 'device' }), []);
+  const mxid = expired ? null : '@' + payload.u + ':' + payload.hs;
 
-  const landInProject = async () => { if (payload.r) { try { await ML.joinRoom(payload.r); } catch (e) {} } };
-
+  // The link's secrets are in the fragment, which is in the address bar,
+  // the tab title's share sheet, and any screenshot of either. Strip it
+  // before doing anything else — we already hold the payload in memory.
   useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        const sess = await ML.login({ homeserver: payload.hs, username: mxid, password: payload.p, keepSignedIn: true });
-        sessRef.current = sess;
-        await landInProject();
-        if (alive) setPhase('name');
-      } catch (e) {
-        if (!alive) return;
-        // A dead temp password (already spent by an earlier visit) means
-        // "you've been here before" — not a dead end.
-        if (e && (e.errcode === 'M_FORBIDDEN' || e.status === 403 || /forbidden|invalid/i.test(e.message || ''))) setPhase('returning');
-        else { setErr(e?.message || "We couldn't open this invite."); setPhase('error'); }
-      }
-    })();
-    return () => { alive = false; };
+    try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
   }, []);
 
-  const saveName = async () => {
+  const enter = async () => {
     if (busy) return;
-    const n = name.trim(); if (!n) { setErr('Pick a name people will see.'); return; }
-    setBusy(true); setErr('');
-    try { await ML.setMyDisplayName(n); setPhase('password'); }
-    catch (e) { setErr(e?.message || "Couldn't save that name."); }
-    setBusy(false);
-  };
-
-  const savePassword = async () => {
-    if (busy) return;
-    if (pw.length < 8) { setErr('Use at least 8 characters.'); return; }
-    if (pw !== pw2) { setErr("The two passwords don't match."); return; }
-    setBusy(true); setErr('');
+    const who = name.trim();
+    if (!who) { setErr('Just a name to show people — anything you like.'); return; }
+    setBusy(true); setErr(''); setPhase('entering');
     try {
-      await ML.changePassword(payload.p, pw, { logoutDevices: false });
-      setCreds({ mxid, password: pw, displayName: name.trim() || payload.n || '' });
-      setBusy(false); setPhase('secure');
-    } catch (e) { setErr(e?.message || "Couldn't set your password."); setBusy(false); }
+      const sess = await ML.claimInvite(payload, { displayName: who });
+      onDone && onDone(sess, payload.r);
+    } catch (e) {
+      setBusy(false);
+      // A dead one-time password means this link has already been
+      // claimed — by them on another device, or by whoever it was
+      // forwarded to. Either way the way back in is the password they
+      // set, if they ever set one.
+      if (e && (e.errcode === 'M_FORBIDDEN' || e.httpStatus === 403 || e.status === 403 || /forbidden|invalid|password/i.test(e.message || ''))) {
+        setErr(''); setPhase('returning');
+      } else {
+        setErr(e?.message || "We couldn't open this invite."); setPhase('error');
+      }
+    }
   };
-
-  const enterProject = () => { setPhase('finishing'); onDone && onDone(sessRef.current, payload.r); };
 
   const returnSignIn = async () => {
     if (busy) return;
@@ -425,8 +418,8 @@ function WelcomeInvite({ payload, onDone }) {
     setBusy(true); setErr('');
     try {
       const sess = await ML.login({ homeserver: payload.hs, username: mxid, password: returnPw, keepSignedIn: true });
-      await landInProject();
-      setPhase('finishing');
+      if (payload.r) { try { await ML.joinRoom(payload.r); } catch (e) {} }
+      setPhase('entering');
       onDone && onDone(sess, payload.r);
     } catch (e) { setErr(e?.message || "That password didn't match."); setBusy(false); }
   };
@@ -438,11 +431,41 @@ function WelcomeInvite({ payload, onDone }) {
   );
   const errBox = err ? <div style={{ marginTop: 12, padding: '8px 10px', border: '1px solid var(--red)', color: 'var(--red)', fontSize: 12, lineHeight: 1.4 }}>{err}</div> : null;
 
-  if (phase === 'signing') return card(
+  if (phase === 'entering') return card(
     <div style={{ textAlign: 'center', padding: '14px 0' }}>
       <Spinner size={22} />
-      <div style={{ fontSize: 13, color: 'var(--text-dim)', marginTop: 14 }}>Opening your invite…</div>
+      <div style={{ fontSize: 13, color: 'var(--text-dim)', marginTop: 14 }}>Setting up your access…</div>
     </div>
+  );
+
+  if (phase === 'expired') return card(
+    <>
+      <div style={{ fontSize: 11, color: 'var(--text-faint)', marginBottom: 8 }}>expired link</div>
+      <h1 style={{ fontSize: 22, margin: '0 0 10px', fontFamily: 'var(--mono)' }}>This link has expired.</h1>
+      <p style={{ fontSize: 13, lineHeight: 1.5, color: 'var(--text-dim)', margin: '0 0 6px' }}>
+        Invite links stop working after a while so an old message can't stay an open door{payload.rt ? <> into <b>{payload.rt}</b></> : ''}.
+      </p>
+      <p style={{ fontSize: 12, lineHeight: 1.5, color: 'var(--text-faint)', margin: 0 }}>Ask whoever sent it for a fresh one — it takes them a few seconds.</p>
+    </>
+  );
+
+  if (phase === 'stranded') return card(
+    <>
+      <div style={{ fontSize: 11, color: 'var(--text-faint)', marginBottom: 8 }}>new device</div>
+      <h1 style={{ fontSize: 22, margin: '0 0 10px', fontFamily: 'var(--mono)' }}>This one needs a password.</h1>
+      <p style={{ fontSize: 13, lineHeight: 1.5, color: 'var(--text-dim)', margin: '0 0 10px' }}>
+        Your access lives on the device you first opened this link on, and it stays there until you add a password. Without one there's no way to sign in here.
+      </p>
+      <p style={{ fontSize: 13, lineHeight: 1.5, color: 'var(--text-dim)', margin: '0 0 10px' }}>
+        On that first device, open the account menu and choose <b>add a password</b>. Then come back here and use it.
+      </p>
+      <p style={{ fontSize: 12, lineHeight: 1.5, color: 'var(--text-faint)', margin: 0 }}>
+        No longer have it? Ask whoever invited you for a new link. You'll come in as a new member — your earlier work stays in the room under your old name.
+      </p>
+      <button style={{ ...btnStyle(false), marginTop: 14 }} onClick={() => { setErr(''); setPhase('returning'); }}>
+        <i className="ph ph-arrow-left" aria-hidden="true"></i>I do have a password
+      </button>
+    </>
   );
 
   if (phase === 'returning') return card(
@@ -450,12 +473,16 @@ function WelcomeInvite({ payload, onDone }) {
       <div style={{ fontSize: 11, color: 'var(--green)', marginBottom: 8 }}>welcome back</div>
       <h1 style={{ fontSize: 24, margin: '0 0 8px', fontFamily: 'var(--mono)' }}>Sign in to continue.</h1>
       <p style={{ fontSize: 13, lineHeight: 1.5, color: 'var(--text-dim)', margin: '0 0 14px' }}>
-        You've set this account up already, so the link's one-time password is spent. Enter the password <b>you chose</b> to pick up where you left off.
+        This link has already been used, so it can't sign you in again. Enter the password <b>you added</b> to pick up where you left off.
       </p>
       <input autoFocus type="password" value={returnPw} onChange={e => { setReturnPw(e.target.value); setErr(''); }} onKeyDown={e => e.key === 'Enter' && returnSignIn()} style={fieldStyle} />
       {errBox}
       <button style={{ ...btnStyle(true), width: '100%', justifyContent: 'center', marginTop: 14 }} disabled={busy} onClick={returnSignIn}>
         {busy ? <Spinner /> : <i className="ph ph-lock-key" aria-hidden="true"></i>}{busy ? 'signing in…' : 'sign in'}
+      </button>
+      <button style={{ background: 'none', border: 'none', padding: 0, marginTop: 12, cursor: 'pointer', color: 'var(--text-faint)', fontSize: 11.5, textDecoration: 'underline' }}
+        onClick={() => { setErr(''); setPhase('stranded'); }}>
+        I never added a password
       </button>
       <div style={{ fontSize: 10.5, color: 'var(--text-faint)', marginTop: 12 }}>{mxid}</div>
     </>
@@ -466,57 +493,121 @@ function WelcomeInvite({ payload, onDone }) {
       <div style={{ fontSize: 11, color: 'var(--red)', marginBottom: 8 }}>something went wrong</div>
       <h1 style={{ fontSize: 22, margin: '0 0 10px', fontFamily: 'var(--mono)' }}>We couldn't open this.</h1>
       <p style={{ fontSize: 13, lineHeight: 1.5, color: 'var(--text-dim)', margin: '0 0 6px' }}>{err}</p>
-      <p style={{ fontSize: 12, lineHeight: 1.5, color: 'var(--text-faint)', margin: 0 }}>Ask whoever sent it for a fresh link.</p>
-    </>
-  );
-
-  if (phase === 'secure') return card(<SecureAccountStep creds={creds} onEnter={enterProject} />);
-
-  if (phase === 'finishing') return card(
-    <div style={{ textAlign: 'center', padding: '14px 0' }}>
-      <i className="ph ph-check-circle" style={{ fontSize: 30, color: 'var(--green)' }} aria-hidden="true"></i>
-      <div style={{ fontSize: 18, margin: '10px 0 4px', fontFamily: 'var(--mono)' }}>You're all set.</div>
-      <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>Taking you in…</div>
-    </div>
-  );
-
-  if (phase === 'name') return card(
-    <>
-      <div style={{ fontSize: 11, color: 'var(--green)', marginBottom: 8 }}>welcome · step 1 of 2</div>
-      <h1 style={{ fontSize: 26, margin: '0 0 8px', fontFamily: 'var(--mono)' }}>What should we call you?</h1>
-      <p style={{ fontSize: 13, lineHeight: 1.5, color: 'var(--text-dim)', margin: '0 0 14px' }}>
-        You've been invited{payload.rt ? <> to <b>{payload.rt}</b></> : ''}. This is your display name — you can change it later.
-      </p>
-      <input autoFocus value={name} onChange={e => { setName(e.target.value); setErr(''); }} onKeyDown={e => e.key === 'Enter' && saveName()}
-        placeholder="e.g. Sam Rivera" style={fieldStyle} />
-      {errBox}
-      <button style={{ ...btnStyle(true), marginTop: 14 }} disabled={busy} onClick={saveName}>
-        {busy ? <Spinner /> : <i className="ph ph-arrow-right" aria-hidden="true"></i>}{busy ? 'saving…' : 'continue'}
+      <p style={{ fontSize: 12, lineHeight: 1.5, color: 'var(--text-faint)', margin: '0 0 14px' }}>Ask whoever sent it for a fresh link.</p>
+      <button style={btnStyle(false)} onClick={() => { setErr(''); setPhase('claiming'); setBusy(false); }}>
+        <i className="ph ph-arrow-clockwise" aria-hidden="true"></i>try again
       </button>
-      <div style={{ fontSize: 10.5, color: 'var(--text-faint)', marginTop: 12 }}>signed in as {mxid}</div>
     </>
   );
 
-  // phase === 'password'
+  // phase === 'claiming' — the only screen most people ever see.
   return card(
     <>
-      <div style={{ fontSize: 11, color: 'var(--green)', marginBottom: 8 }}>welcome · step 2 of 2</div>
-      <h1 style={{ fontSize: 26, margin: '0 0 8px', fontFamily: 'var(--mono)' }}>Set your password.</h1>
+      <div style={{ fontSize: 11, color: 'var(--green)', marginBottom: 8 }}>you've been invited</div>
+      <h1 style={{ fontSize: 26, margin: '0 0 8px', fontFamily: 'var(--mono)' }}>What should we call you?</h1>
       <p style={{ fontSize: 13, lineHeight: 1.5, color: 'var(--text-dim)', margin: '0 0 14px' }}>
-        Your invite came with a temporary password. Choose your own now — only you will know it.
+        {payload.rt ? <><b>{payload.rt}</b> is ready for you.</> : 'Your workspace is ready.'} There's nothing to sign up for — this {device.device} remembers you.
       </p>
-      <label style={{ fontSize: 10.5, color: 'var(--text-faint)', display: 'block', marginBottom: 4 }}>new password</label>
-      <input autoFocus type="password" value={pw} onChange={e => { setPw(e.target.value); setErr(''); }} style={{ ...fieldStyle, marginBottom: 10 }} />
-      <label style={{ fontSize: 10.5, color: 'var(--text-faint)', display: 'block', marginBottom: 4 }}>confirm password</label>
-      <input type="password" value={pw2} onChange={e => { setPw2(e.target.value); setErr(''); }} onKeyDown={e => e.key === 'Enter' && savePassword()} style={fieldStyle} />
+      <input autoFocus value={name} onChange={e => { setName(e.target.value); setErr(''); }} onKeyDown={e => e.key === 'Enter' && enter()}
+        placeholder="e.g. Sam Rivera" style={fieldStyle} />
       {errBox}
-      <button style={{ ...btnStyle(true), marginTop: 14 }} disabled={busy} onClick={savePassword}>
-        {busy ? <Spinner /> : <i className="ph ph-lock-key" aria-hidden="true"></i>}{busy ? 'setting…' : 'finish & enter'}
+      <button style={{ ...btnStyle(true), width: '100%', justifyContent: 'center', marginTop: 14 }} disabled={busy} onClick={enter}>
+        {busy ? <Spinner /> : <i className="ph ph-arrow-right" aria-hidden="true"></i>}
+        {busy ? 'setting up…' : (payload.rt ? `open ${payload.rt}` : 'open the workspace')}
       </button>
+      <div style={{ fontSize: 10.5, color: 'var(--text-faint)', marginTop: 14, lineHeight: 1.5 }}>
+        You'll show up as <b>{(ML.accountDisplayName?.(name) || name.trim()) || '…'}</b>. Add a password later if you want this on another {device.device === 'device' ? 'device' : 'device too'}.
+      </div>
     </>
   );
 }
 
-Object.assign(window, { InvitePanel, WelcomeInvite });
+
+// ─────────────────────────────────────────────────────────────────────────
+// PasswordNudge — the one place we bring the password up unprompted.
+//
+// A share-link account lives on the device that claimed it. That is the
+// point (nobody had to sign up) and it is also the risk (lose the device,
+// lose the access), and the only moment we can do anything about it is
+// while they still have the device. So we do raise it — but as a strip
+// they can wave away, not a gate, and not until they have actually done
+// something worth keeping.
+//
+// Rules it follows, deliberately:
+//   - never on arrival: EDITS_BEFORE_NUDGE writes have to land first
+//   - never twice in a session, and not for a week after a dismissal
+//   - never for an account that already has a password
+//   - louder, and immediately, when the browser tells us it won't keep
+//     local storage at all (private windows) — there the account really
+//     does die with the tab, so "later" is not an option we can offer
+// ─────────────────────────────────────────────────────────────────────────
+
+const NUDGE_SNOOZE_KEY = 'matrix-events.password-nudge.snoozed-until';
+const NUDGE_SNOOZE_MS = 7 * 24 * 60 * 60 * 1000;
+const EDITS_BEFORE_NUDGE = 3;
+
+function snoozed() {
+  try { return Date.now() < Number(localStorage.getItem(NUDGE_SNOOZE_KEY) || 0); }
+  catch { return false; }
+}
+function snooze() {
+  try { localStorage.setItem(NUDGE_SNOOZE_KEY, String(Date.now() + NUDGE_SNOOZE_MS)); } catch {}
+}
+
+function PasswordNudge({ session, editCount, onAddPassword }) {
+  const ML = window.MatrixLive;
+  const [deviceOnly, setDeviceOnly] = useState(false);
+  const [durable, setDurable] = useState(true);
+  const [dismissed, setDismissed] = useState(() => snoozed());
+  const device = useMemo(() => ML?.currentDevice?.() || { device: 'device' }, []);
+
+  useEffect(() => {
+    if (!session || session.demo) return;
+    let alive = true;
+    Promise.resolve(ML?.isDeviceOnlyAccount?.())
+      .then(v => { if (alive) setDeviceOnly(!!v); })
+      .catch(() => {});
+    // Storage the browser won't promise to keep means the account can
+    // vanish on its own — worth saying out loud rather than waiting for
+    // the edit count.
+    Promise.resolve(navigator.storage?.persisted?.())
+      .then(p => { if (alive && p === false) setDurable(false); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [session]);
+
+  const urgent = deviceOnly && !durable;
+  if (!deviceOnly || dismissed) return null;
+  if (!urgent && editCount < EDITS_BEFORE_NUDGE) return null;
+
+  const dismiss = () => { snooze(); setDismissed(true); };
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 10, padding: '7px 12px',
+      borderBottom: '1px solid var(--border)',
+      background: urgent ? 'var(--surface-2, transparent)' : 'transparent',
+      fontSize: 11.5, lineHeight: 1.45,
+    }}>
+      <i className={`ph ph-${urgent ? 'warning' : 'device-mobile'}`} style={{ color: urgent ? 'var(--red)' : 'var(--text-faint)', flex: '0 0 auto' }} aria-hidden="true"></i>
+      <span style={{ minWidth: 0, color: 'var(--text-dim)' }}>
+        {urgent
+          ? <>This browser isn't saving anything to disk, so your access disappears when you close it. <b>Add a password now</b> to keep it.</>
+          : <>Your access lives on this {device.device}. Add a password to open it on another one — or to get back in if you lose this.</>}
+      </span>
+      <span style={{ marginLeft: 'auto', display: 'flex', gap: 6, flex: '0 0 auto' }}>
+        <button style={btnStyle(true)} onClick={() => { setDismissed(true); onAddPassword?.(); }}>add a password</button>
+        {!urgent && (
+          <button onClick={dismiss} title="not now"
+            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-faint)', fontSize: 13 }}>
+            <i className="ph ph-x" aria-hidden="true"></i>
+          </button>
+        )}
+      </span>
+    </div>
+  );
+}
+
+Object.assign(window, { InvitePanel, WelcomeInvite, PasswordNudge });
 
 })();

@@ -794,11 +794,39 @@ function App() {
   // A #join= link's target room, held until a session exists to act on —
   // covers "not signed in yet" (normal login screen shows first) as well
   // as the already-signed-in case (joins immediately, see the effect below).
-  const [pendingJoin, setPendingJoin] = useState(() => {
-    if (typeof location === 'undefined' || !location.hash.startsWith('#join=')) return null;
-    const payload = window.MatrixLive?.parseJoinToken?.(location.hash.slice('#join='.length));
-    return payload || null;
-  });
+  //
+  // Both link types capture their RAW fragment at mount and decode it
+  // later, which matters for two independent reasons:
+  //
+  //   - `window.MatrixLive` may not exist yet on the first render. The
+  //     bridge sits behind the crypto-wasm top-level await (the same race
+  //     `booting` exists for), so decoding at mount would quietly yield
+  //     null and the link would do nothing at all.
+  //   - the fragment does not survive to a later render: the invite
+  //     landing page strips it from the address bar as its first act, so
+  //     that a link's secrets don't linger in the URL bar, the
+  //     back-forward cache, or a screenshot of either.
+  //
+  // Capturing the string is free and needs no bridge; decoding waits.
+  const [joinToken, setJoinToken] = useState(() =>
+    (typeof location !== 'undefined' && location.hash.startsWith('#join='))
+      ? location.hash.slice('#join='.length) : null);
+  const [inviteToken, setInviteToken] = useState(() =>
+    (typeof location !== 'undefined' && location.hash.startsWith('#welcome='))
+      ? location.hash.slice('#welcome='.length) : null);
+
+  // Decoded forms. `booting` is a dependency because it is precisely the
+  // signal that the bridge has finished resolving — when it flips, a
+  // token that couldn't be decoded before now can be.
+  const invite = useMemo(
+    () => (inviteToken ? (window.MatrixLive?.parseInviteToken?.(inviteToken) || null) : null),
+    [inviteToken, booting]);
+  const [pendingJoin, setPendingJoin] = useState(null);
+  useEffect(() => {
+    if (!joinToken) return;
+    const payload = window.MatrixLive?.parseJoinToken?.(joinToken);
+    if (payload) { setPendingJoin(payload); setJoinToken(null); }
+  }, [joinToken, booting]);
 
   // Act on a #join= link the moment a real session exists — whether that
   // session was already live when the link opened, or the user just signed
@@ -815,9 +843,28 @@ function App() {
     })();
     return () => { cancelled = true; };
   }, [pendingJoin, session]);
+
+  // An invite link opened on a device that is ALREADY signed in — the
+  // common case being the recipient coming back to the same link on the
+  // same phone, where the auto-restore below has just brought their
+  // session up. Nothing should be asked of them: the link degrades to a
+  // plain "go to this room".
+  //
+  // This also covers someone else's session (the inviter testing their
+  // own link). Joining as whoever is signed in is the safe reading —
+  // claiming the invite's account would silently sign them out of theirs.
+  useEffect(() => {
+    if (!invite || !session || session.demo) return;
+    if (!invite.expired && invite.r) setPendingJoin({ r: invite.r, rt: invite.rt });
+    setInviteToken(null);
+  }, [invite, session]);
   // Account dashboard: null when closed, else the tab to open ('profile' |
   // 'security' | 'people'). Live (non-demo) sessions only.
   const [accountTab, setAccountTab] = useState(null);
+
+  // Writes made in this session. Only used to time the password nudge —
+  // see PasswordNudge in invite-view.jsx.
+  const [editCount, setEditCount] = useState(0);
 
   const [csvImport, setCsvImport] = useState(null); // {id, file, roomId} | null
   const [exportingSchema, setExportingSchema] = useState(false);
@@ -1320,6 +1367,9 @@ function App() {
       demoStoreRef.current.emit(roomId, op, content, sender);
     }
     setCursor(Infinity);
+    // Feeds the "add a password" nudge, which deliberately waits until
+    // someone has written something worth not losing.
+    setEditCount(n => n + 1);
 
     // Best-effort: email anyone actively watching this anchor. Fires from
     // whoever just made the change (this client, right now) — there's no
@@ -1420,23 +1470,24 @@ function App() {
     setSelection({ kind: 'slice', sliceId: `${sel.tableId}.view.${view.id}`, tableId: sel.tableId, sliceKind: 'table', viewId: view.id, _seed: { filters: cfg.filters, sorts: cfg.sorts, hidden: cfg.hidden } });
   }, []);
 
-  // A #welcome= invite link takes over the whole screen regardless of
-  // session state — a fresh guest has none yet, and WelcomeInvite itself
-  // handles the "already set up, sign in with your own password" case.
-  if (typeof location !== 'undefined' && location.hash.startsWith('#welcome=')) {
-    const payload = window.MatrixLive?.parseInviteToken?.(location.hash.slice('#welcome='.length));
-    if (payload) {
-      return (
-        <window.WelcomeInvite
-          payload={payload}
-          onDone={(sess, roomId) => {
-            try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
-            setSession(sess);
-            if (roomId) setCurrentRoomId(roomId);
-          }}
-        />
-      );
-    }
+  // A #welcome= invite link takes over the whole screen — but only once
+  // we know there is no session to resume. Rendering it while the bridge
+  // is still restoring would ask a returning recipient to "set up" an
+  // account they are already signed into, which is the exact prompt this
+  // whole flow exists to avoid. The effect above disposes of the invite
+  // if a session does turn up.
+  if (invite && booting) return <window.BootSplash />;
+  if (invite && !session) {
+    return (
+      <window.WelcomeInvite
+        payload={invite}
+        onDone={(sess, roomId) => {
+          setInviteToken(null);
+          setSession(sess);
+          if (roomId) setCurrentRoomId(roomId);
+        }}
+      />
+    );
   }
 
   // Gate the app on auth (or demo session) — every hook is above this line.
@@ -1450,6 +1501,23 @@ function App() {
 
   async function handleSignOut() {
     if (isLive && window.MatrixLive) {
+      // An account claimed from a share link authenticates with a secret
+      // held only on this device, and signing out wipes it. There is no
+      // "sign back in" for that account afterwards — no password exists
+      // to type — so this is a one-way door and has to read as one.
+      // Guarded here rather than at each button so every entry point
+      // (topbar, launchpad, account dashboard) is covered.
+      try {
+        if (await window.MatrixLive.isDeviceOnlyAccount?.()) {
+          const ok = confirm(
+            "Signing out will permanently delete this account's access.\n\n" +
+            "You've never set a password, so it lives only on this device — there'd be nothing to sign back in with. " +
+            "Add a password first (account → security) if you want to keep it.\n\n" +
+            'Sign out anyway?'
+          );
+          if (!ok) return;
+        }
+      } catch (e) { console.warn('[app] sign-out guard failed:', e); }
       try { await window.MatrixLive.logout(); } catch (e) { console.warn('[app] logout failed:', e); }
     }
     // Deliberate sign-out: forget the resume point so the next sign-in
@@ -1700,6 +1768,14 @@ function App() {
     );
   }
 
+  const passwordNudgeEl = (isLive && !session?.demo && window.PasswordNudge) ? (
+    <window.PasswordNudge
+      session={session}
+      editCount={editCount}
+      onAddPassword={() => setAccountTab('security')}
+    />
+  ) : null;
+
   return (
     <div className="shell" onClickCapture={onActivityCapture}>
       <div className="topbar">
@@ -1804,6 +1880,8 @@ function App() {
           <span className="tt-label">{live ? 'time-travel' : `t-${total - effectiveCursor}`}</span>
         </button>
       </div>
+
+      {passwordNudgeEl}
 
       {ephemerals.length > 0 && (
         <div className="eph-rail" aria-label="live activity">
