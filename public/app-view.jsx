@@ -45,6 +45,7 @@ function Kanban({ state, onEmit, entityType, myUserId }) {
   const [addingCol, setAddingCol] = React.useState(false);
   const [newColName, setNewColName] = React.useState('');
   const [showFieldsMenu, setShowFieldsMenu] = React.useState(false);
+  const [editingAnchor, setEditingAnchor] = React.useState(null);
 
   const schemaPartitions = state.schema?.partitions?.[entityType] || [];
   // Anything in data but not in schema is shown but flagged
@@ -234,6 +235,7 @@ function Kanban({ state, onEmit, entityType, myUserId }) {
                     draggable
                     onDragStart={() => setDragAnchor(t._anchor)}
                     onDragEnd={() => setDragAnchor(null)}
+                    onClick={() => setEditingAnchor(t._anchor)}
                   >
                     <div className="title" style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 4 }}>
                       <span>{t[titleField] || '(no ' + titleField + ')'}</span>
@@ -334,7 +336,175 @@ function Kanban({ state, onEmit, entityType, myUserId }) {
         )}
       </div>
     </div>
+    {editingAnchor && state.entities[editingAnchor] && (
+      <CardDetailModal
+        entity={state.entities[editingAnchor]}
+        entityType={entityType}
+        fields={fields}
+        titleField={titleField}
+        partitions={allPartitions}
+        currentPartition={state.partitions[editingAnchor] || 'unsorted'}
+        onEmit={onEmit}
+        onClose={() => setEditingAnchor(null)}
+      />
+    )}
     </>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// CardDetailModal — click a card to edit every field on it, not just the
+// title. Every commit is its own DEF (or SEG for the column), same emit
+// path as the grid's inline cell editing — there's no separate "save".
+// ─────────────────────────────────────────────────────────────────────────
+
+function CardDetailModal({ entity, entityType, fields, titleField, partitions, currentPartition, onEmit, onClose }) {
+  const [title, setTitle] = React.useState(entity[titleField] || '');
+  React.useEffect(() => { setTitle(entity[titleField] || ''); }, [entity._anchor, entity[titleField]]);
+
+  React.useEffect(() => {
+    function onKey(e) { if (e.key === 'Escape') onClose(); }
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  function commitField(name, value) {
+    if (value === entity[name]) return;
+    onEmit(AV_OP.DEF, { anchor: entity._anchor, path: name, value });
+  }
+
+  function commitTitle() {
+    const trimmed = title.trim();
+    if (trimmed !== (entity[titleField] || '')) commitField(titleField, trimmed);
+  }
+
+  function movePartition(p) {
+    if (p === currentPartition) return;
+    onEmit(AV_OP.SEG, { anchor: entity._anchor, partition: p });
+  }
+
+  const otherFields = fields.filter(f => f.name !== titleField);
+
+  return (
+    <div className="proj-modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="proj-modal cd-modal" onMouseDown={e => e.stopPropagation()}>
+        <header className="proj-modal-head">
+          <div className="proj-modal-eyebrow">{entityType} <code style={{ fontWeight: 400 }}>{entity._anchor}</code></div>
+          <input
+            className="proj-name-input"
+            value={title}
+            placeholder={`(no ${titleField})`}
+            onChange={e => setTitle(e.target.value)}
+            onBlur={commitTitle}
+            onKeyDown={e => { if (e.key === 'Enter') e.target.blur(); }}
+          />
+        </header>
+        <div className="proj-modal-body">
+          <div className="rd-field">
+            <label className="rd-label">column <span className="rd-type">SEG</span></label>
+            <select className="proj-name-input" value={currentPartition} onChange={e => movePartition(e.target.value)}>
+              {partitions.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+          </div>
+          {otherFields.map(f => (
+            <div className="rd-field" key={f.name}>
+              <label className="rd-label">{f.name} <span className="rd-type">{f.type}</span></label>
+              <CardFieldInput field={f} value={entity[f.name]} onCommit={v => commitField(f.name, v)} />
+            </div>
+          ))}
+          {otherFields.length === 0 && (
+            <div className="rd-field"><span className="rd-empty">no other fields on {entityType} yet</span></div>
+          )}
+        </div>
+        <footer className="proj-modal-foot">
+          <button className="proj-modal-cancel" onClick={onClose}>close</button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+// One field's editor, dispatched by schema type. Every branch commits on
+// blur/change rather than per keystroke, matching table-view.jsx's
+// EditableCell/DetailField so a card edit is one DEF, not a DEF per key.
+function CardFieldInput({ field, value, onCommit }) {
+  const [draft, setDraft] = React.useState(() => value === undefined || value === null ? '' : String(value));
+  React.useEffect(() => {
+    setDraft(value === undefined || value === null ? '' : String(value));
+  }, [value]);
+
+  if (field.type === 'formula') {
+    const empty = value === undefined || value === null || value === '';
+    return <div className="rd-value rd-derived" title="derived — not directly editable">{empty ? <span className="rd-empty">empty</span> : String(value)}</div>;
+  }
+
+  if (field.type === 'boolean') {
+    return <input type="checkbox" checked={!!value} onChange={e => onCommit(e.target.checked)} />;
+  }
+
+  if (field.type === 'select') {
+    return (
+      <select className="proj-name-input" value={value || ''} onChange={e => onCommit(e.target.value || null)}>
+        <option value="">—</option>
+        {(field.options || []).map(o => <option key={o} value={o}>{o}</option>)}
+      </select>
+    );
+  }
+
+  if (field.type === 'multiselect') {
+    const values = Array.isArray(value) ? value : [];
+    function toggle(o) {
+      onCommit(values.includes(o) ? values.filter(x => x !== o) : [...values, o]);
+    }
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {(field.options || []).map(o => (
+          <label key={o} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
+            <input type="checkbox" checked={values.includes(o)} onChange={() => toggle(o)} />
+            {o}
+          </label>
+        ))}
+        {(field.options || []).length === 0 && <span className="rd-empty">no options defined</span>}
+      </div>
+    );
+  }
+
+  if (field.type === 'date') {
+    return <input type="date" className="proj-name-input" value={draft} onChange={e => { setDraft(e.target.value); onCommit(e.target.value || null); }} />;
+  }
+
+  if (field.type === 'longtext' || field.type === 'json') {
+    return (
+      <textarea
+        className="rd-input rd-textarea"
+        value={draft}
+        onChange={e => setDraft(e.target.value)}
+        onBlur={() => {
+          let parsed = draft;
+          if (field.type === 'json') { try { parsed = JSON.parse(draft); } catch {} }
+          if (parsed !== value) onCommit(parsed);
+        }}
+      />
+    );
+  }
+
+  // text, number, and any type without a dedicated widget
+  return (
+    <input
+      className="rd-input"
+      type={field.type === 'number' ? 'number' : 'text'}
+      value={draft}
+      onChange={e => setDraft(e.target.value)}
+      onBlur={() => {
+        let parsed = draft;
+        if (field.type === 'number') {
+          const n = parseFloat(draft);
+          parsed = draft.trim() === '' ? null : (isNaN(n) ? value : n);
+        }
+        if (parsed !== value) onCommit(parsed);
+      }}
+      onKeyDown={e => { if (e.key === 'Enter') e.target.blur(); }}
+    />
   );
 }
 
