@@ -219,7 +219,7 @@ export async function getCachedMediaBytes(mxc) {
  * Unlike wipeMediaCache (logout — drops everything), this is the targeted
  * reclaim used by the sync page to drop blobs that are still on disk but no
  * longer referenced by the live workspace — the classic case being the source
- * blobs of *superseded* import generations (a re-synced Airtable table uploads
+ * blobs of *superseded* import generations (re-importing a source uploads
  * fresh blobs each time; the old generation's rows stop materializing but its
  * mirror lingers forever). Each entry is keyed by the same mxc→filename hash
  * the cache writer uses, so a caller that knows the dead mxcs can free exactly
@@ -271,26 +271,104 @@ export async function wipeMediaCache() {
 
 // ── Upload (encrypted) ──
 
+// The homeserver's advertised `m.upload.size`, cached for the session. Asking
+// costs one request; not asking costs a large upload that streams for a while
+// and then dies as a bare connection reset (the SDK surfaces xhr.status 0 as
+// an "AbortError", which tells the user nothing).
+let uploadLimit;   // undefined = not asked yet, null = server didn't say
+
+async function getUploadLimit() {
+  if (uploadLimit !== undefined) return uploadLimit;
+  const client = getClient();
+  if (!client?.getMediaConfig) { uploadLimit = null; return uploadLimit; }
+  try {
+    const cfg = await client.getMediaConfig();
+    const n = cfg && cfg['m.upload.size'];
+    uploadLimit = typeof n === 'number' && n > 0 ? n : null;
+  } catch {
+    // Some homeservers 404 /media/config. Unknown limit is not a failure —
+    // we just lose the pre-flight check and fall back to a clearer error.
+    uploadLimit = null;
+  }
+  return uploadLimit;
+}
+
+function fmtMb(n) {
+  if (n == null) return 'unknown';
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(n < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+}
+
+/**
+ * Turn the SDK's upload failures into something a person can act on. An
+ * aborted XHR (status 0) is indistinguishable at this layer from a reset
+ * connection, a proxy body-size cap, and a dropped network — so the message
+ * names all three rather than guessing, and leads with the size when the file
+ * is large enough for that to be the likely cause.
+ */
+function uploadError(err, byteLength, limit, chunk) {
+  const name = err?.name || '';
+  const msg = err?.message || String(err || '');
+  const where = chunk ? ` (part ${chunk.part} of ${chunk.of})` : '';
+  if (err?.errcode === 'M_TOO_LARGE' || /too large/i.test(msg)) {
+    return new Error(
+      `too large for this homeserver${where} — ${fmtMb(byteLength)}` +
+      (limit ? `, and the limit is ${fmtMb(limit)}` : '')
+    );
+  }
+  if (name === 'AbortError' || /timeout/i.test(msg)) {
+    return new Error(
+      `the upload stopped partway${where}. ` +
+      (chunk
+        ? 'That is usually a dropped connection rather than a size problem — the file was already split to fit. Try again.'
+        : 'The homeserver or a proxy in front of it cuts the connection when a file is over its size limit' +
+          (limit ? ` — this one advertises ${fmtMb(limit)}` : '') +
+          '; a dropped network does the same thing. Try again.')
+    );
+  }
+  return new Error(msg || 'upload failed');
+}
+
 /**
  * Encrypt `plaintext`, upload the ciphertext to the homeserver media
  * store, and mirror the plaintext locally for offline reads. Returns
  * a `__media: 2` reference suitable for embedding in event content.
+ *
+ * `onProgress({loaded, total})` fires as the bytes go out, so a caller can
+ * show real movement instead of a spinner that looks identical to a hang.
  */
-export async function uploadEncrypted(plaintext, { mime = 'application/octet-stream', name = 'file' } = {}) {
+export async function uploadEncrypted(plaintext, { mime = 'application/octet-stream', name = 'file', onProgress } = {}) {
   const client = getClient();
   if (!client) throw new Error('Not connected — cannot upload media');
 
   const bytes = plaintext instanceof Uint8Array ? plaintext : new Uint8Array(plaintext);
+
+  // AES-CTR is a stream cipher: the ciphertext is exactly as long as the
+  // plaintext, so the plaintext length is the number to check against the
+  // server's limit.
+  const limit = await getUploadLimit();
+  if (limit && bytes.length > limit) {
+    throw new Error(
+      `too large for this homeserver — ${fmtMb(bytes.length)}, and the limit is ${fmtMb(limit)}`
+    );
+  }
+
   const { data, info } = await encryptAttachment(bytes);
 
   // The Matrix media endpoint accepts any MIME; we deliberately send
   // application/octet-stream for the ciphertext so the server can't
   // sniff structure.
   const blob = new Blob([data], { type: 'application/octet-stream' });
-  const resp = await client.uploadContent(blob, {
-    type: 'application/octet-stream',
-    name,
-  });
+  let resp;
+  try {
+    resp = await client.uploadContent(blob, {
+      type: 'application/octet-stream',
+      name,
+      progressHandler: onProgress,
+    });
+  } catch (e) {
+    throw uploadError(e, bytes.length, limit);
+  }
   const mxc = resp && resp.content_uri;
   if (!mxc) throw new Error('Upload returned no content_uri');
 
@@ -306,16 +384,121 @@ export async function uploadEncrypted(plaintext, { mime = 'application/octet-str
   };
 }
 
+/** The homeserver's per-file ceiling in bytes, or null when it won't say. */
+export async function maxUploadBytes() {
+  return await getUploadLimit();
+}
+
+// ── Chunked upload (`__media: 3`) ──
+//
+// A homeserver's media endpoint has a hard per-file ceiling — 25 MB is a
+// common default, and going over it does not come back as a tidy 413: the
+// proxy in front of the server usually cuts the connection mid-body, which
+// the SDK can only report as a bare abort.
+//
+// So a file bigger than the ceiling is split. Each part is encrypted under
+// its OWN key and uploaded as an independent blob; the event carries a small
+// manifest listing them in order:
+//
+//   { __media: 3, mime, size, name, parts: [{ mxc, size, file }, …] }
+//
+// Reassembly is this module's business and nobody else's. The drive shows
+// one document, with one name, one size, one preview — the parts never
+// surface as separate files, and `getMediaBytes`/`getMediaBlob` hand back the
+// whole thing. Each part is mirrored to OPFS on its own, so an interrupted
+// download resumes from whatever parts already landed.
+
+// Leave the server's stated ceiling a little room: the limit is usually
+// enforced on the whole request, not just the body.
+const CHUNK_HEADROOM = 256 * 1024;
+const MIN_CHUNK = 1024 * 1024;
+// Used when the server won't state a limit but the file is large enough that
+// one POST is a bad bet anyway.
+const DEFAULT_CHUNK = 16 * 1024 * 1024;
+const CHUNK_UNKNOWN_LIMIT_THRESHOLD = 48 * 1024 * 1024;
+// Each manifest part costs ~200 bytes of event content; the event itself has
+// to stay well inside Matrix's 64KB ceiling. Past this many parts the chunk
+// size grows instead of the manifest.
+const MAX_PARTS = 128;
+
+/** Chunk size for `size` bytes, or null when it should go in one piece. */
+function planChunking(size, limit) {
+  let chunk;
+  if (limit) {
+    if (size <= limit) return null;
+    chunk = Math.max(MIN_CHUNK, limit - CHUNK_HEADROOM);
+  } else {
+    if (size <= CHUNK_UNKNOWN_LIMIT_THRESHOLD) return null;
+    chunk = DEFAULT_CHUNK;
+  }
+  // Keep the manifest small enough to ride inside one event.
+  if (Math.ceil(size / chunk) > MAX_PARTS) chunk = Math.ceil(size / MAX_PARTS);
+  return chunk;
+}
+
+export { planChunking };
+
+/**
+ * Encrypt + upload one part. Split out so the single-shot and chunked paths
+ * share exactly one code path to the server.
+ */
+async function uploadOnePart(client, bytes, name, onProgress) {
+  const { data, info } = await encryptAttachment(bytes);
+  const blob = new Blob([data], { type: 'application/octet-stream' });
+  const resp = await client.uploadContent(blob, {
+    type: 'application/octet-stream',
+    name,
+    progressHandler: onProgress,
+  });
+  const mxc = resp && resp.content_uri;
+  if (!mxc) throw new Error('Upload returned no content_uri');
+  await cacheMediaBytes(mxc, bytes);
+  return { mxc, size: bytes.length, file: info };
+}
+
+/**
+ * Upload a File/Blob that exceeds the server's ceiling as ordered parts.
+ * Reads one chunk at a time (never the whole file into memory) and reports
+ * progress against the ORIGINAL size, so the caller shows one file moving.
+ */
+async function uploadChunked(file, { mime, name, chunkSize, onProgress }) {
+  const client = getClient();
+  const total = file.size;
+  const parts = [];
+  let done = 0;
+  for (let start = 0; start < total; start += chunkSize) {
+    const end = Math.min(start + chunkSize, total);
+    const slice = new Uint8Array(await file.slice(start, end).arrayBuffer());
+    const base = done;
+    let part;
+    try {
+      part = await uploadOnePart(client, slice, `${name}.part${parts.length + 1}`,
+        ({ loaded }) => onProgress && onProgress({ loaded: base + Math.min(loaded, slice.length), total }));
+    } catch (e) {
+      throw uploadError(e, slice.length, chunkSize, { part: parts.length + 1, of: Math.ceil(total / chunkSize) });
+    }
+    parts.push(part);
+    done = end;
+    onProgress && onProgress({ loaded: done, total });
+  }
+  return { __media: 3, mime, size: total, name, parts };
+}
+
 /**
  * Convenience: encrypt + upload + cache a user-supplied File / Blob,
- * preserving its declared MIME type and filename.
+ * preserving its declared MIME type and filename. Splits into parts when the
+ * file is over the homeserver's ceiling — the caller gets one ref either way.
  */
 export async function uploadFile(file, opts = {}) {
+  const mime = opts.mime || file.type || 'application/octet-stream';
+  const name = opts.name || file.name || 'file';
+  const limit = await getUploadLimit();
+  const chunkSize = planChunking(file.size, limit);
+  if (chunkSize) {
+    return uploadChunked(file, { mime, name, chunkSize, onProgress: opts.onProgress });
+  }
   const bytes = new Uint8Array(await file.arrayBuffer());
-  return uploadEncrypted(bytes, {
-    mime: opts.mime || file.type || 'application/octet-stream',
-    name: opts.name || file.name || 'file',
-  });
+  return uploadEncrypted(bytes, { mime, name, onProgress: opts.onProgress });
 }
 
 // ── Hoist (sending side) ──
@@ -457,7 +640,9 @@ const inFlightMedia = new Map();           // mxc -> Promise<Uint8Array|null>
  * or every download attempt failed).
  */
 export async function getMediaBytes(ref) {
-  if (!ref || !ref.mxc) return null;
+  if (!ref) return null;
+  if (ref.__media === 3) return await getMultipartBytes(ref);
+  if (!ref.mxc) return null;
 
   const cached = await getCachedMediaBytes(ref.mxc);
   if (cached) return cached;
@@ -494,6 +679,71 @@ export async function getMediaBytes(ref) {
 
   inFlightMedia.set(ref.mxc, job);
   return job;
+}
+
+/**
+ * Fetch one part of a `__media: 3` file. Parts are ordinary v2 attachments
+ * with their own key, so this is `getMediaBytes` for a single member of the
+ * manifest — cache first, then the media store.
+ */
+function partRef(part, ref) {
+  return { __media: 2, mxc: part.mxc, file: part.file, mime: ref.mime, size: part.size };
+}
+
+/**
+ * Reassemble a chunked file into one buffer. `onProgress({loaded,total})`
+ * reports against the whole file, not the current part, so a caller shows a
+ * single file downloading. Returns null if any part is unavailable — a file
+ * missing a middle chunk is not a shorter file, it is an unreadable one.
+ */
+export async function getMultipartBytes(ref, onProgress) {
+  if (!Array.isArray(ref?.parts) || !ref.parts.length) return null;
+  const total = ref.size || ref.parts.reduce((n, p) => n + (p.size || 0), 0);
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const part of ref.parts) {
+    const bytes = await getMediaBytes(partRef(part, ref));
+    if (!bytes) return null;
+    if (at + bytes.length > out.length) return null;   // manifest disagrees with the blobs
+    out.set(bytes, at);
+    at += bytes.length;
+    onProgress && onProgress({ loaded: at, total });
+  }
+  return at === out.length ? out : out.subarray(0, at);
+}
+
+/**
+ * The same bytes as a Blob. Preferred for previews and downloads of large
+ * files: the parts are held as separate Blobs and stitched by reference, so
+ * a multi-gigabyte document never needs one contiguous allocation the way
+ * `getMediaBytes` does.
+ */
+export async function getMediaBlob(ref, onProgress) {
+  if (!ref) return null;
+  const type = ref.mime || 'application/octet-stream';
+  if (ref.__media !== 3) {
+    const bytes = await getMediaBytes(ref);
+    return bytes ? new Blob([bytes], { type }) : null;
+  }
+  if (!Array.isArray(ref.parts) || !ref.parts.length) return null;
+  const total = ref.size || ref.parts.reduce((n, p) => n + (p.size || 0), 0);
+  const chunks = [];
+  let loaded = 0;
+  for (const part of ref.parts) {
+    const bytes = await getMediaBytes(partRef(part, ref));
+    if (!bytes) return null;
+    chunks.push(bytes);
+    loaded += bytes.length;
+    onProgress && onProgress({ loaded, total });
+  }
+  return new Blob(chunks, { type });
+}
+
+/** Every mxc a ref points at — one for a plain blob, N for a chunked one. */
+export function mxcsOf(ref) {
+  if (!ref) return [];
+  if (ref.__media === 3) return (ref.parts || []).map(p => p.mxc).filter(Boolean);
+  return ref.mxc ? [ref.mxc] : [];
 }
 
 /**
@@ -536,7 +786,8 @@ function collectCandidates(node, path, out) {
 
 function collectMediaRefs(node, path, out) {
   if (node && typeof node === 'object') {
-    if ((node.__media === 1 || node.__media === 2) && typeof node.mxc === 'string') {
+    if (((node.__media === 1 || node.__media === 2) && typeof node.mxc === 'string') ||
+        (node.__media === 3 && Array.isArray(node.parts))) {
       out.push({ path: [...path], ref: node });
       return;
     }

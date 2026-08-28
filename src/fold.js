@@ -56,6 +56,17 @@ export function initial() {
     cursor: 0,
     _undecryptable: 0,
     _violations: [],
+    // anchor → events that arrived before the INS that creates it. See
+    // `park` below: an out-of-order write is held, not dropped.
+    _orphans: new Map(),
+    // event_id → already applied. "Same events in, same state out" only
+    // holds if applying an event twice is the same as applying it once, and
+    // the same event really does arrive twice: the live timeline and the
+    // durable block chain both carry it, and a backfill page can overlap
+    // what's already held. Without this, a doubled log doubles every CON
+    // edge and every EVA, and a repeated INS resets an entity — dropping
+    // every DEF applied to it since.
+    _applied: new Set(),
   };
 }
 
@@ -96,6 +107,43 @@ function cyrb53(str, seed = 0) {
 
 export { cyrb53 };
 
+// ── Out-of-order writes ──
+//
+// `origin_server_ts` is assigned by the homeserver when it RECEIVES an event,
+// not when the client emitted it. A burst from one action — `INS _doc` then
+// `DEF file` then `DEF uploaded_at` — is three separate sends, and a slow or
+// retried one can be stamped seconds after a sibling that left later. Sorting
+// by timestamp then puts a DEF ahead of the very INS that creates its entity.
+//
+// Dropping that DEF is not an option: for a drive document it is the media
+// reference, so the file becomes permanently unreadable while its bytes sit
+// safely on the media store. So a write against an entity that doesn't exist
+// YET is parked under its anchor and replayed the moment the INS lands, in
+// arrival order. The violation is still recorded — the log really was
+// malformed — but tagged `_recovered` once the entity turns up, so the linter
+// can tell "arrived out of order" from "never had an INS at all".
+
+function park(state, anchor, event, violation) {
+  if (!state._orphans) state._orphans = new Map();
+  if (!state._orphans.has(anchor)) state._orphans.set(anchor, []);
+  state._orphans.get(anchor).push({ event, violation });
+}
+
+function drainOrphans(state, anchor) {
+  const held = state._orphans?.get(anchor);
+  if (!held || !held.length) return;
+  state._orphans.delete(anchor);          // delete first — no re-parking loop
+  for (const { event, violation } of held) {
+    if (violation) violation._recovered = true;
+    // A parked event was already stamped into `_applied` on its first pass
+    // (where it found no entity and was held). Clear that so the replay —
+    // the pass that actually applies it — isn't swallowed as a duplicate.
+    const id = typeof event?.getId === 'function' ? event.getId() : event?.event_id;
+    if (id) state._applied?.delete(id);
+    dispatch(state, event);
+  }
+}
+
 // ── Dispatch ──
 
 /**
@@ -125,12 +173,34 @@ function dispatch(state, event) {
   const op = parseEventType(type);
   if (!op) return state;
 
-  state.cursor = ts;
+  // Exactly-once. Optimistic local events have no server id yet and are
+  // reconciled by transaction id elsewhere, so they're exempt.
+  if (eventId) {
+    if (!state._applied) state._applied = new Set();
+    if (state._applied.has(eventId)) return state;
+    state._applied.add(eventId);
+  }
+
+  // Monotonic: replaying a parked event (see `park`) revisits an older
+  // timestamp, and the cursor must not walk backwards when it does.
+  if (ts > state.cursor) state.cursor = ts;
 
   switch (op) {
     case OP.INS: {
       const { anchor, entity_type, payload } = content;
       if (!anchor) break;
+      const existing = state.entities[anchor];
+      if (existing) {
+        // Idempotent INS. The anchor is the hash of (type, payload, sender,
+        // ts), so a repeat carries the same payload by construction — and
+        // overwriting would discard every DEF, SEG and EVA applied since.
+        // Fill in anything genuinely absent and leave the rest alone.
+        for (const k of Object.keys(payload || {})) {
+          if (!(k in existing)) existing[k] = payload[k];
+        }
+        drainOrphans(state, anchor);
+        break;
+      }
       state.entities[anchor] = {
         ...payload,
         _anchor: anchor,
@@ -140,6 +210,8 @@ function dispatch(state, event) {
         _eventId: eventId,
         _hwm: OP.INS.order,
       };
+      // Anything that arrived for this anchor before its INS now applies.
+      drainOrphans(state, anchor);
       break;
     }
 
@@ -148,10 +220,10 @@ function dispatch(state, event) {
       if (!anchor) break;
       const entity = state.entities[anchor];
       if (!entity) {
-        // SEG on non-existent entity — INS dependency missing
-        state._violations.push({
-          type: 'missing_ins', op: 'SEG', anchor, _ts: ts,
-        });
+        // SEG before its INS — hold it for replay rather than losing the move.
+        const violation = { type: 'missing_ins', op: 'SEG', anchor, _ts: ts };
+        state._violations.push(violation);
+        park(state, anchor, event, violation);
         break;
       }
       state.partitions[anchor] = partition;
@@ -234,9 +306,11 @@ function dispatch(state, event) {
       if (!anchor) break;
       const entity = state.entities[anchor];
       if (!entity) {
-        state._violations.push({
-          type: 'missing_ins', op: 'DEF', anchor, _ts: ts,
-        });
+        // DEF before its INS — hold it. This is the one that loses data if
+        // dropped: a drive document's `file` DEF is its media reference.
+        const violation = { type: 'missing_ins', op: 'DEF', anchor, _ts: ts };
+        state._violations.push(violation);
+        park(state, anchor, event, violation);
         break;
       }
       if (path) {
@@ -299,26 +373,50 @@ function dispatch(state, event) {
 // ── Public API ──
 
 /**
- * Stable chronological sort for a batch of events.
+ * Stable, dependency-correct sort for a batch of events.
  *
  * Events reach the fold in *arrival* order, which is not chronological:
  * backfill pages, federation, and especially late `onDecrypted` events
  * (an `m.room.encrypted` event whose key arrives after later events were
  * already stored) land out of order. Operators carry hard dependency
  * ordering (INS before its DEFs), so folding out of order produces spurious
- * `missing_ins` violations and silently dropped DEFs. Sort by
- * (origin_server_ts, event_id) before folding so order is deterministic and
- * dependency-correct regardless of how events arrived. Ties on ts (same-ms
- * emits) break by event_id for stability.
+ * `missing_ins` violations and silently dropped DEFs. Sorting by
+ * `origin_server_ts` fixes the across-time case.
+ *
+ * It does NOT fix the within-one-millisecond case, and that one is not
+ * exotic — it is the common case. A single user action routinely emits a
+ * burst: creating a drive document is `INS _doc` + `DEF file` + `DEF
+ * uploaded_at`, all stamped with the same `Date.now()`. Tie-breaking those
+ * on `event_id` orders them by an opaque server-assigned string, so roughly
+ * half the time a `DEF` sorts ahead of the very `INS` that creates its
+ * entity — the DEF is then dropped as `missing_ins`, and a document loses
+ * the media reference that makes it readable.
+ *
+ * So a tie on timestamp breaks on OPERATOR ORDER first. The nine operators
+ * are dependency-ordered by construction (NUL → SIG → INS → SEG → CON → SYN
+ * → DEF → EVA → REC): each one's preconditions are satisfied by the ones
+ * before it. Within a single millisecond that ordering is exactly the causal
+ * one, and for events touching different anchors the relative order is
+ * immaterial either way. Same-operator ties still fall through to event_id
+ * and then input order, so repeated DEFs to one path keep last-write-wins.
  */
 function chronological(events) {
   const ts = (e) => (typeof e?.getTs === 'function' ? e.getTs() : e?.origin_server_ts) || 0;
   const id = (e) => (typeof e?.getId === 'function' ? e.getId() : e?.event_id) || '';
+  const order = (e) => {
+    const type = typeof e?.getType === 'function' ? e.getType() : e?.type;
+    const op = parseEventType(type);
+    // Anything we don't recognise (m.room.encrypted, foreign events) keeps
+    // its place at the end of the millisecond rather than jumping the queue.
+    return op ? op.order : Number.MAX_SAFE_INTEGER;
+  };
   return events
-    .map((e, i) => [e, i])
+    .map((e, i) => [e, i, ts(e), order(e)])
     .sort((a, b) => {
-      const d = ts(a[0]) - ts(b[0]);
+      const d = a[2] - b[2];
       if (d !== 0) return d;
+      const o = a[3] - b[3];
+      if (o !== 0) return o;
       const ia = id(a[0]), ib = id(b[0]);
       if (ia < ib) return -1;
       if (ia > ib) return 1;

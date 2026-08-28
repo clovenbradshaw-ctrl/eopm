@@ -98,10 +98,15 @@ function buildSets(state) {
   if (importIdx !== -1) {
     raw.push(sets.splice(importIdx, 1)[0]);
   }
-  if (state._violations && state._violations.length > 0) {
+  // A violation the fold recovered from (a DEF that arrived before its own
+  // INS and was replayed once it landed) is a fact about the log, not a
+  // problem with the data — it stays in `_violations` for the linter but
+  // doesn't put a standing count in the rail.
+  const openViolations = (state._violations || []).filter(v => !v._recovered);
+  if (openViolations.length > 0) {
     raw.push({
       id: '_violations', name: '_violations', kind: 'meta',
-      rows: state._violations.length, declared: false,
+      rows: openViolations.length, declared: false,
       slices: [{ id: '_violations.table', kind: 'table', name: 'table', tableId: '_violations' }],
     });
   }

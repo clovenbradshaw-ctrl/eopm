@@ -204,11 +204,12 @@ Two footguns the page now handles:
   `usage > quota` (impossible) pinned at 100%. When `usage > quota` the page
   flags the estimate as unreliable and leads with `measuredBytes` (OPFS +
   Cache Storage, counted directly).
-* **Orphaned import blobs.** Re-syncing an Airtable base uploads a *fresh*
-  source blob per generation; `CsvImport.activeImports` drops the old
-  generation from the fold, but its mirrored OPFS blob lingers forever —
-  unbounded growth across re-syncs. `app.jsx` collects the superseded mxcs
-  (`reclaimableMedia`) and the sync page's **Reclaim** button calls
+* **Orphaned import blobs.** Re-importing a source uploads a *fresh* blob per
+  generation; `CsvImport.activeImports` drops the old generation from the
+  fold, but its mirrored OPFS blob lingers forever — unbounded growth across
+  re-imports. `app.jsx` collects the superseded mxcs (`reclaimableMedia`, via
+  `ML.mxcsOf` so a chunked import's every part is counted) and the sync page's
+  **Reclaim** button calls
   `ML.purgeMediaBlobs` (`purgeMediaByMxc` in `src/media.js`) to free exactly
   those bytes. Dropping a still-wanted blob is non-destructive — it
   re-downloads on next read — so the reclaim is safe even if over-eager.

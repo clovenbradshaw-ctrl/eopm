@@ -116,63 +116,74 @@ The **expression lives in the schema log; the value is never stored.**
 value stored under its key — replay the log to any cursor and the computed
 column re-derives for that moment. So you never `DEF` a computed value; you
 `DEF` the formula once and the fold does the rest. The dialect is
-Airtable-flavoured and case-insensitive — `{Field}` refs, `&` concat, `=`
+spreadsheet-flavoured and case-insensitive — `{Field}` refs, `&` concat, `=`
 equality, and the published function set (`SUM`/`IF`/`SWITCH`/`CONCATENATE`/
 `ARRAYJOIN`/`REGEX_*`/`DATETIME_*`/`WORKDAY*`, …); rollups aggregate a field
-across `CON` edges of a named relation. Function coverage is pinned to
-Airtable's own reference in `test/formula.test.cjs`.
+across `CON` edges of a named relation. Function coverage is pinned in
+`test/formula.test.cjs`.
 
-### Importing an Airtable base
+### The drive: documents, folders, attachments
 
-The **"⊞ airtable"** button (sidebar) opens a widget that **connects to
-Airtable with a personal-access token (PAT)**. You paste a scoped, read-only
-token (`schema.bases:read`, plus `data.records:read` to pull rows — create one
-at [airtable.com/create/tokens](https://airtable.com/create/tokens)), the
-widget lists your bases, you pick one, and `public/airtable-import.jsx`'s small
-`window.AirtableAPI` client fetches the base schema straight from the Metadata
-API (`GET /v0/meta/bases/{baseId}/tables`) — no copy-paste. The token stays in
-the browser tab: it is sent only to `api.airtable.com`, never to this workspace
-or its homeserver, and never persisted. A no-token fallback remains — paste the
-Metadata response yourself for a schema-only import.
+Files are entities in the same log as rows, so they replay, time-travel and
+sync like anything else. `public/drive.js` is the whole data model:
 
-`public/airtable-schema.js` then turns that response into this schema. Airtable's
-`formula` / `rollup` / `lookup` / `count` / `createdTime` columns map to the
-computed definitions above (formula field-id references are rewritten to
-`{Field Name}`); selects carry their choices; record links become
-`_schema.links` + a `linked` field. This step imports **no rows** — it is a
-pure transform, headlessly tested in `test/airtable-schema.test.cjs` +
-`test/formula.test.cjs` (`npm test`).
+```
+folder    INS _folder {name, parent}   DEF name / parent   SEG _trashed
+document  INS _doc    {name, mime, size, folder}
+                      DEF file → the `__media` ref   DEF name / folder   SEG _trashed
+```
 
-Tick **"also import each table's records"** (live workspaces only) and the
-widget additionally pulls every table's rows via the data API and feeds them
-through the same lazy importer the CSV/JSON path uses (`ML.importFile`,
-`materialize: false`) — no per-row events. Records are **streamed and written
-as ordered chunks** (~10k rows each), every chunk its own `import` entity
-sharing the table's `derived_set`; the materializer concatenates them by row
-anchor, so chunking needs no reader changes. Chunking bounds the upload's
-peak memory and, more importantly, makes **first paint on a fresh device** fast:
-`app.jsx` materializes the **open table's chunks first** (priority-ordered, with
-a small concurrency pool) so the table you're looking at streams in before the
-rest of the base — instead of every table's blob downloading up front in
-arbitrary order against a cold media cache.
+Both types are `_`-prefixed, so `buildSets()` keeps them out of the sidebar's
+set list — the drive (sidebar → **Drive**) is a lens on the log, not a table.
 
-**Re-syncing is idempotent.** Every chunk also carries a stable `import_group`
-(`at:<baseId>:<tableId>`) and a per-sync `import_seq` generation. Re-opening the
-dialog on a base you've synced before defaults its tables back **on** and labels
-them *re-sync*; the new rows land as a higher `import_seq`, and
-`CsvImport.activeImports` keeps only the newest generation per group when
-materializing — so a re-sync **replaces** the prior rows (and re-emits the
-schema, computed-field definitions included) instead of stacking duplicates. The
-superseded generations stay in the append-only log untouched; they're simply not
-materialized, which also means time-travel shows whichever generation was newest
-at the cursor.
+**An attachment is a reference, not a container.** A field of type
+`attachment` holds an *array of document anchors*, written with a plain `DEF`
+like any other cell:
 
-Only data fields get an extraction plan; **computed and linked fields are never
-written as data**, so Airtable's pre-computed values are dropped and the
-formulas recompute live against your rows (links become `CON` edges you draw
-after import). **Attachment fields** become a short text summary (filename +
-count) — their files are not re-hosted and Airtable's URLs expire, so the raw
-links are deliberately dropped.
+```
+attach   DEF <record> <field> [...existing, docAnchor]
+detach   DEF <record> <field> [...existing without docAnchor]
+```
+
+So detaching writes to the **record**, never to the document — which is why a
+file removed from a record stays in the drive, and why a file uploaded from a
+record's cell appears in the drive the moment it is `INS`'d. There is no second
+copy to keep in step, and *"attached to N records"* is just the reverse index
+of those `DEF`s (`Drive.usageIndex`). `test/drive.test.mjs` pins this down
+against the real fold.
+
+**Reading documents natively.** The bytes of a drive document are plaintext
+only inside the tab that holds the room key — handing them to Google Docs
+Viewer or an Office web preview would undo the property the whole app is built
+to hold. So `public/docview.js` parses them in the browser: a small ZIP reader
+(`DecompressionStream('deflate-raw')`) plus a pull XML tokenizer gets
+`.docx` / `.xlsx` / `.pptx` / `.odt` / `.ods` / `.odp`, and hand-rolled readers
+cover `.csv` / `.tsv` / `.md` / `.json` / `.rtf` and zip listings. Each yields a
+list of blocks (`h`, `p`, `li`, `table`, `sheet`, `slide`, `code`, `files`) the
+viewer draws. It is a *content* reader, not a layout engine: it recovers text,
+structure, tables and sheets, and says so rather than pretending to be Word.
+Images, PDF, audio and video render straight from the bytes; anything with no
+reader offers a download. `test/docview.test.mjs` runs the parsers against real
+ZIP containers built in the test, on both the stored and deflated paths.
+
+**Large files are split, and stay one document.** A homeserver's media endpoint
+has a hard per-file ceiling (25 MB is a common default), and exceeding it does
+not come back as a clean 413 — the proxy in front usually cuts the connection
+mid-body, which the SDK can only report as a bare `AbortError`. So `media.js`
+asks the server for `m.upload.size` once, and a file over it is uploaded as
+ordered parts, each with **its own AES key**, under a manifest ref:
+
+```
+{ __media: 3, mime, size, name, parts: [{ mxc, size, file }, …] }
+```
+
+Reassembly is `media.js`'s business alone: `getMediaBytes` / `getMediaBlob`
+stitch the parts back (each part mirrored to OPFS on its own, so an interrupted
+download resumes from what already landed), and the drive shows one document —
+one name, one size, one preview, one download. The chunk size is the server's
+limit less some headroom, grown if a manifest would otherwise outgrow a single
+64 KB event. `test/media-chunk.test.mjs` covers the split arithmetic and the
+byte-exact round trip.
 
 ### Imported data is permanent: the media-store block chain
 

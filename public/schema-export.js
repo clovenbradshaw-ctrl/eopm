@@ -8,8 +8,7 @@
  *   window.SchemaExport.toMarkdown(state) → human-readable report
  *
  * Pure — no DOM, no globals other than the assignment at the bottom. Loaded
- * as a classic script alongside airtable-schema.js so it's testable from
- * Node with a `module` shim.
+ * as a classic script so it's testable from Node with a `module` shim.
  */
 
 (function () {
@@ -32,6 +31,7 @@
     linked: 'TEXT',
     formula: 'TEXT',
     rollup: 'TEXT',
+    attachment: 'TEXT[]',   // array of drive document anchors
   };
 
   function sqlType(t) {

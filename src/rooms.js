@@ -44,12 +44,6 @@ export async function createRoom(name, roomType, meta = {}) {
         [`${ns}.member_key`]: 0,
         [`${ns}.wkey`]: 0,
         [`${ns}.blocks`]: 0,
-        // Lets any member (PL 0) publish their own WCK-encrypted Airtable PAT
-        // share. Sender-scoped (state_key = own mxid, enforced by Matrix auth),
-        // so opening it up grants nothing beyond each member's own slot — and
-        // without it only the room creator (PL 100) could share a token, which
-        // would exclude every invitee from enabling sync.
-        [`${ns}.airtable_pat`]: 0,
       },
     },
     initial_state: [
@@ -565,8 +559,7 @@ export function getDisplayName(userId) {
 /**
  * Subscribe to a specific custom state-event type in a room. The handler
  * is called with the MatrixEvent whenever a state event of `type` arrives
- * for the given room — used to react to a member publishing/revoking their
- * WCK-encrypted Airtable PAT share (`<ns>.airtable_pat`).
+ * for the given room.
  *
  * @param {string} roomId
  * @param {string} type
