@@ -685,12 +685,7 @@ function DriveView({ room, state, onEmit, scrubber, session, setSelection }) {
         </div>
         <div className="page-hero-title">Drive</div>
         <div className="page-hero-sub">
-          Every file in this workspace, whether you dropped it here or attached it to a
-          record. Documents are entities in the same encrypted log as your rows — so they
-          replay, time-travel, and sync the same way. Detaching a file from a record only
-          rewrites that record: the file stays here. Files past the homeserver's per-upload
-          ceiling are split into encrypted parts behind the scenes and stay one document
-          here — one name, one preview, one download.
+          Every file in this workspace, whether you filed it here or attached it to a record.
         </div>
         <div className="dv-hero-stats">
           <span><b>{docCount}</b> {docCount === 1 ? 'file' : 'files'}</span>
