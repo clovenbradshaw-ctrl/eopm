@@ -23,7 +23,7 @@ import { login as mxLogin, unlock as mxUnlock,
          requestPasswordReset, completePasswordReset, changePassword as mxChangePassword,
          setProgress, setRecoveryKeyDisplayer, setRecoveryKeyProvider,
          register as mxRegister, buildInviteLink, parseInviteToken,
-         buildJoinLink, parseJoinToken } from './client.js';
+         buildJoinLink, parseJoinToken, generateDeviceSecret } from './client.js';
 import { setNamespace, OP, ins, def, seg, con, syn, eva, rec, defSchema, getNamespace,
          setOptimisticHook, eventType as opEventType, emit as rawEmit } from './operators.js';
 import { planLazyImport } from './dataset.js';
@@ -45,7 +45,9 @@ import { loadManifest, saveManifest } from './roomManifest.js';
 import * as memory from './memory.js';
 import { ensureIdentity, loadIdentityFromVault, getIdentity, clearIdentity } from './crypto/identity.js';
 import { ensureWorkspaceKey, publishMemberKey, grantWorkspaceKey,
-         adoptGrantedKey, clearWorkspaceKeys } from './crypto/workspaceKey.js';
+         adoptGrantedKey, clearWorkspaceKeys, exportWorkspaceKeyB64,
+         adoptWorkspaceKeyB64 } from './crypto/workspaceKey.js';
+import { accountDisplayName, deviceDisplayName, currentDevice } from './device.js';
 import { appendBlock, loadChains, readOwnHead } from './blocks.js';
 import * as driveBackup from './drivebackup.js';
 import * as emailWebhook from './emailWebhook.js';
@@ -1745,6 +1747,218 @@ async function changePassword(oldPassword, newPassword) {
   return mxChangePassword(oldPassword, newPassword);
 }
 
+
+// ── Guest accounts: claim, resume, and the password that comes later ─────
+//
+// A share link's recipient should not have to *decide* to have an account.
+// So claimInvite() creates one for them and stores its credential on the
+// device; the password only enters the story when they want a second
+// device. This is the whole flow, in the order it has to happen:
+//
+//   1. sign in with the link's one-time password
+//   2. rotate it to a random device secret, kept vault-encrypted here
+//      — this is what spends the link, so a forwarded copy is inert
+//   3. take the workspace key out of the link so the room isn't empty
+//   4. name the account "<what they typed> (<device>)" and join
+//
+// Steps 2 and 3 are the ones with teeth. Everything after step 1 is
+// best-effort: a guest who lands in the room with an unrotated password
+// is in a worse security position but a working one, and telling them
+// "setup failed" when they are demonstrably inside would be a lie.
+//
+// The device secret is stored under the vault, whose key is stashed per
+// the session's persistence setting. Claiming always persists — an
+// account that evaporates on tab close is not "saved to their device".
+
+const DEVICE_SECRET_NAME = 'device_password';
+const MEMBER_STATUS_TYPE = () => `${NAMESPACE}.member_status`;
+
+async function readDeviceSecret(userId) {
+  try { return await loadSecret(userId, DEVICE_SECRET_NAME); }
+  catch { return null; }
+}
+
+/**
+ * Does this account still live only on this device? True when we hold a
+ * device secret for it — i.e. nobody has chosen a password, so there is
+ * no way to sign in anywhere else. Drives the "add a password" nudge and
+ * the account dashboard's primary action.
+ */
+async function isDeviceOnlyAccount() {
+  const userId = activeSession?.mxid;
+  if (!userId || activeSession.demo) return false;
+  return !!(await readDeviceSecret(userId));
+}
+
+/**
+ * Tell the rest of the room whether this account is recoverable, so the
+ * person who shared the link can see who is one lost phone away from
+ * losing access. Self-reported by design: state_key = our own mxid, which
+ * Matrix auth rules mean only we can write. Nobody else *can* observe
+ * this — device lists are private to their owner — so an honest
+ * self-report is the only mechanism available.
+ */
+async function publishMemberStatus(roomId, patch) {
+  const client = getClient();
+  const userId = activeSession?.mxid;
+  if (!client || !userId || !roomId) return;
+  try {
+    let existing = {};
+    try { existing = await client.getStateEvent(roomId, MEMBER_STATUS_TYPE(), userId) || {}; }
+    catch (e) { if (e?.errcode !== 'M_NOT_FOUND' && e?.httpStatus !== 404) throw e; }
+    const next = { v: 1, ...existing, ...patch };
+    if (JSON.stringify(next) === JSON.stringify(existing)) return;
+    await client.sendStateEvent(roomId, MEMBER_STATUS_TYPE(), next, userId);
+  } catch (e) {
+    console.warn('[claim] member_status publish failed:', e?.message || e);
+  }
+}
+
+/** Every member's self-reported status in a room: { mxid: {device, recoverable} }. */
+function membersStatus(roomId) {
+  const client = getClient();
+  const out = {};
+  try {
+    const evs = client?.getRoom(roomId)?.currentState?.getStateEvents(MEMBER_STATUS_TYPE()) || [];
+    for (const ev of evs) {
+      const k = ev.getStateKey();
+      if (k) out[k] = ev.getContent() || {};
+    }
+  } catch {}
+  return out;
+}
+
+/** Mark every workspace we're in as recoverable/not. Fire-and-forget. */
+function republishStatusEverywhere(patch) {
+  for (const r of listRooms()) {
+    if ((r.membership || 'join') !== 'join') continue;
+    publishMemberStatus(r.id, patch).catch(() => {});
+  }
+}
+
+/**
+ * Open a #welcome= link on a device that has never seen this account.
+ * Returns the live session. Throws only when the guest genuinely cannot
+ * get in — a spent or expired link — so the caller can route to the
+ * "sign in with the password you added" screen.
+ */
+async function claimInvite(payload, { displayName } = {}) {
+  const mxid = '@' + payload.u + ':' + payload.hs;
+  const dev = currentDevice();
+
+  // 1. Spend the link. `persist` so the account survives a browser
+  //    restart — this IS the account's home now.
+  const session = await loginWithMatrix({
+    homeserver: payload.hs, username: mxid, password: payload.p, keepSignedIn: true,
+  });
+
+  // 2. Rotate the link's password to a secret only this device holds, so
+  //    the copy of the link in someone's inbox stops being a credential.
+  //    Order matters: store the new secret BEFORE telling the homeserver,
+  //    so a crash between the two leaves us with a secret that doesn't
+  //    work (recoverable — the link still does) rather than a working
+  //    secret we've forgotten (not recoverable).
+  const deviceSecret = generateDeviceSecret();
+  let rotated = false;
+  try {
+    await storeSecret(session.mxid, DEVICE_SECRET_NAME, deviceSecret);
+    await mxChangePassword(payload.p, deviceSecret, { logoutDevices: false });
+    rotated = true;
+  } catch (e) {
+    console.warn('[claim] could not rotate the invite password:', e?.message || e);
+    // The homeserver still holds the link's password, so THAT is what
+    // this device has to remember — it is what a later "add a password"
+    // will authenticate with. Only correct to write this because the
+    // change above is what failed; once it has succeeded, the stored
+    // secret must never be walked back.
+    try { await storeSecret(session.mxid, DEVICE_SECRET_NAME, payload.p); } catch {}
+  }
+
+  // Bring the local vault and the server-side identity onto whichever
+  // password is now live. Both are separately best-effort and separately
+  // self-healing (a stale vault is fixed by the next cold login, a stale
+  // identity by the next login with a password in scope) — but leaving
+  // account_data wrapped under a password nobody will ever type again is
+  // the kind of thing that rots quietly, so we close it now.
+  const livePassword = rotated ? deviceSecret : payload.p;
+  if (rotated) {
+    try { await vault.rekey(session.mxid, livePassword); }
+    catch (e) { console.warn('[claim] vault rekey failed:', e?.message || e); }
+  }
+  // Let the login's own identity bootstrap finish before re-wrapping, or
+  // the two race each other writing the same account_data blob.
+  try {
+    await identityReady;
+    await ensureIdentity(getClient(), NAMESPACE, session.mxid, livePassword);
+  } catch (e) { console.warn('[claim] identity re-wrap failed:', e?.message || e); }
+
+  // 3. Enter the room, and take the workspace key out of the link so the
+  //    history is readable now rather than whenever a member next opens
+  //    the app. Join first: adopting the key publishes room state.
+  if (payload.r) {
+    try { await joinRoom(payload.r); } catch (e) { console.warn('[claim] join failed:', e?.message || e); }
+    if (payload.k) {
+      try { await adoptWorkspaceKeyB64(getClient(), NAMESPACE, payload.r, payload.k); }
+      catch (e) { console.warn('[claim] link key adopt failed:', e?.message || e); }
+    }
+  }
+
+  // 4. Name it after what they typed and what they typed it on.
+  const chosen = accountDisplayName(displayName || payload.n || '');
+  if (chosen) { try { await setMyDisplayName(chosen); } catch (e) { console.warn('[claim] display name failed:', e?.message || e); } }
+  // A just-claimed account has no password by construction, so it is not
+  // yet recoverable off this device. setAccountPassword() flips this.
+  if (payload.r) publishMemberStatus(payload.r, { device: dev.device, recoverable: false }).catch(() => {});
+  if (!rotated) console.warn('[claim] invite password was not rotated — the link is still a working credential');
+
+  return session;
+}
+
+/**
+ * Give this account a password its owner knows — the step that turns
+ * "lives on this phone" into "opens anywhere". Three things rotate, and
+ * none of them touches room data:
+ *
+ *   homeserver password   so a second device can authenticate at all
+ *   vault wrapping        so this device's cache opens under it (the
+ *                         master key is unchanged, so nothing on disk
+ *                         needs re-encrypting — see vault.js)
+ *   envelope identity     re-wrapped under the new account key, which
+ *                         leaves the workspace key wrapping — and so
+ *                         every encrypted byte in every room — alone
+ *
+ * `current` is optional: an account that has never had a password is
+ * authenticated with the stored device secret instead.
+ */
+async function setAccountPassword(newPassword, current) {
+  const userId = activeSession?.mxid;
+  if (!userId || activeSession.demo) throw new Error('Sign in first');
+  if (!newPassword || newPassword.length < 8) throw new Error('Use at least 8 characters.');
+
+  const deviceSecret = await readDeviceSecret(userId);
+  const oldPassword = current || deviceSecret;
+  if (!oldPassword) throw new Error('Enter your current password.');
+
+  await mxChangePassword(oldPassword, newPassword, { logoutDevices: false });
+
+  // From here the homeserver has already moved. Each step below is
+  // independently recoverable — a failed vault rekey is fixed by the next
+  // cold login, a failed identity re-wrap by the next one with the
+  // password in scope — so none of them should surface as a failure to
+  // set the password, which demonstrably succeeded.
+  try { await vault.rekey(userId, newPassword); }
+  catch (e) { console.warn('[claim] vault rekey failed:', e?.message || e); }
+
+  try { await ensureIdentity(getClient(), NAMESPACE, userId, newPassword); }
+  catch (e) { console.warn('[claim] identity re-wrap failed:', e?.message || e); }
+
+  // The account is no longer device-only: drop the secret and say so.
+  removeSecret(userId, DEVICE_SECRET_NAME);
+  republishStatusEverywhere({ recoverable: true });
+  notify('session');
+  return true;
+}
+
 // ── Recovery key prompts: relay to React via a window slot ──
 setRecoveryKeyDisplayer((key) => new Promise((resolve) => {
   if (typeof window.__matrixLiveRecoveryDisplay === 'function') {
@@ -1780,6 +1994,8 @@ window.MatrixLive = {
   requestPasswordReset,
   completePasswordReset,
   changePassword,
+  changeAccountPassword: setAccountPassword,
+  isDeviceOnlyAccount,
   // Invite links: mint a guest account (register, never touches this
   // session) + the #welcome=/#join= link encode/decode used by invite-view.jsx
   register: mxRegister,
@@ -1787,6 +2003,27 @@ window.MatrixLive = {
   parseInviteToken,
   buildJoinLink,
   parseJoinToken,
+  // The guest side of a #welcome= link: create-and-keep the account on
+  // this device (claimInvite), or sign back in on a second one.
+  claimInvite,
+  // Read capability for a room, base64, for a share link's fragment.
+  // Null when we don't hold the key yet — the share UI waits rather than
+  // handing out a link that opens an empty-looking room.
+  exportRoomKey: async (roomId) => {
+    const cached = exportWorkspaceKeyB64(roomId);
+    if (cached) return cached;
+    await ensureWorkspaceKey(getClient(), NAMESPACE, roomId);
+    return exportWorkspaceKeyB64(roomId);
+  },
+  // Self-reported per-member state (which device claimed the account,
+  // whether it has a password). See publishMemberStatus.
+  membersStatus,
+  // What this browser is, for UI that says "you're on your iPhone", and
+  // the one implementation of the "<typed name> (<device>)" rule so the
+  // landing page's preview can't drift from what actually gets set.
+  currentDevice,
+  deviceDisplayName,
+  accountDisplayName,
   getSession: () => activeSession,
   isAuthed: () => !!activeSession,
   isStale: () => !!(activeSession && activeSession.stale),

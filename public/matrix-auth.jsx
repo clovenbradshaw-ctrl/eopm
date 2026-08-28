@@ -375,7 +375,7 @@ function PasswordResetBody({ defaultHomeserver, onBack }) {
             </div>
           </div>
           <label className="login-field">
-            <span className="login-label">new password</span>
+            <span className="login-label">{deviceOnly ? 'password' : 'new password'}</span>
             <div className="login-input-wrap">
               <input
                 ref={firstRef}
@@ -388,7 +388,7 @@ function PasswordResetBody({ defaultHomeserver, onBack }) {
             </div>
           </label>
           <label className="login-field">
-            <span className="login-label">confirm new password</span>
+            <span className="login-label">{deviceOnly ? 'confirm password' : 'confirm new password'}</span>
             <div className="login-input-wrap">
               <input
                 type="password"
@@ -913,6 +913,20 @@ function MemberManager({ roomId, mySession, autoFocus }) {
     if (roomId && ML?.loadMembers) ML.loadMembers(roomId);
   }, [ML, roomId]);
 
+  // Each member's self-report: which kind of device claimed the account,
+  // and whether it has a password. The second one matters here because a
+  // link-invited member with no password is one lost phone away from
+  // losing their access, and the person who invited them is the only one
+  // in a position to say "add one" — nobody can observe another user's
+  // devices, so a self-report is the only signal that exists.
+  const [statuses, setStatuses] = useState({});
+  useEffect(() => {
+    if (!roomId || !ML?.membersStatus) return;
+    const read = () => setStatuses(ML.membersStatus(roomId) || {});
+    read();
+    return ML.subscribe?.((reason) => { if (reason === 'members' || reason === 'rooms') read(); });
+  }, [ML, roomId]);
+
   if (!roomId) return null;
   const myMxid = mySession?.mxid;
   const canInvite = myPowerLevel >= 50;
@@ -1015,9 +1029,14 @@ function MemberManager({ roomId, mySession, autoFocus }) {
                 ? m.displayName
                 : m.userId.replace(/^@/, '').split(':')[0];
               const initial = (nameLabel[0] || '?').toUpperCase();
+              const st = statuses[m.userId] || {};
               const statusLabel = m.membership === 'join' ? 'active'
                                 : m.membership === 'invite' ? 'invited'
                                 : m.membership;
+              // "joined from iPhone · no password" — only shown for
+              // members who report it, i.e. link invitees.
+              const deviceNote = m.membership === 'join' && st.device ? st.device : null;
+              const atRisk = m.membership === 'join' && st.recoverable === false;
               return (
                 <tr key={m.userId}>
                   <td title={m.userId}>
@@ -1029,6 +1048,13 @@ function MemberManager({ roomId, mySession, autoFocus }) {
                   </td>
                   <td className={m.membership === 'invite' ? 'muted' : ''}>
                     {statusLabel}
+                    {deviceNote && <span className="muted" style={{marginLeft:6}}>· {deviceNote}</span>}
+                    {atRisk && (
+                      <span title="This account has no password, so it only works on the device that claimed it. If they lose it, they lose access — ask them to add one."
+                            style={{marginLeft:6, color:'var(--text-faint)', cursor:'help'}}>
+                        · no password
+                      </span>
+                    )}
                   </td>
                   <td>
                     <RoleSelect
@@ -1208,6 +1234,22 @@ function AccountSecurityTab({ session, disabled, onSignOut }) {
   const [err, setErr]   = useState(null);
   const [done, setDone] = useState(false);
 
+  // An account claimed from a share link has no password its owner
+  // knows — it authenticates with a secret held only on this device. So
+  // this section is either "add one" (and unlock every other device) or
+  // "change the one you have", and they are genuinely different
+  // propositions: the first is the thing standing between this person
+  // and losing their access with their phone.
+  const [deviceOnly, setDeviceOnly] = useState(null);   // null = still checking
+  const device = useMemo(() => ML?.currentDevice?.() || { device: 'this device' }, []);
+  useEffect(() => {
+    let alive = true;
+    Promise.resolve(ML?.isDeviceOnlyAccount?.())
+      .then(v => { if (alive) setDeviceOnly(!!v); })
+      .catch(() => { if (alive) setDeviceOnly(false); });
+    return () => { alive = false; };
+  }, [done]);
+
   const [rkBusy, setRkBusy] = useState(false);
   const [rk, setRk]         = useState(null);
   const [rkErr, setRkErr]   = useState(null);
@@ -1215,12 +1257,16 @@ function AccountSecurityTab({ session, disabled, onSignOut }) {
 
   async function changePassword() {
     setErr(null); setDone(false);
-    if (!cur)          { setErr('enter your current password'); return; }
+    if (!deviceOnly && !cur) { setErr('enter your current password'); return; }
     if (pw.length < 8) { setErr('new password: use at least 8 characters'); return; }
     if (pw !== pw2)    { setErr('new passwords do not match'); return; }
     setBusy(true);
     try {
-      await ML.changePassword(cur, pw);
+      // One call for both cases. With no current password to give, it
+      // authenticates with this device's stored secret; either way it
+      // also re-wraps the local vault and the envelope identity, which
+      // is what keeps the room data readable without re-encrypting it.
+      await ML.changeAccountPassword(pw, deviceOnly ? undefined : cur);
       setDone(true);
       setCur(''); setPw(''); setPw2('');
     } catch (e) {
@@ -1250,31 +1296,44 @@ function AccountSecurityTab({ session, disabled, onSignOut }) {
   return (
     <>
       <div className="share-section">
-        <div className="share-section-label">change password</div>
-        <label className="login-field">
-          <span className="login-label">current password</span>
-          <div className="login-input-wrap">
-            <input type="password" value={cur} onChange={e => setCur(e.target.value)} placeholder="••••••••" disabled={disabled || busy} />
+        <div className="share-section-label">{deviceOnly ? 'add a password' : 'change password'}</div>
+        {deviceOnly && (
+          <div className="share-hint" style={{marginBottom:10, lineHeight:1.5}}>
+            Your access lives on {device.device === 'device' ? 'this device' : `this ${device.device}`} and nowhere else.
+            Add a password and you can open your workspaces on any other device — and get back in if you lose this one.
+            Nothing you've written is re-encrypted; the password just wraps the key.
           </div>
-        </label>
-        <label className="login-field" style={{marginTop:10}}>
-          <span className="login-label">new password</span>
+        )}
+        {!deviceOnly && (
+          <label className="login-field">
+            <span className="login-label">current password</span>
+            <div className="login-input-wrap">
+              <input type="password" value={cur} onChange={e => setCur(e.target.value)} placeholder="••••••••" disabled={disabled || busy} />
+            </div>
+          </label>
+        )}
+        <label className="login-field" style={{marginTop: deviceOnly ? 0 : 10}}>
+          <span className="login-label">{deviceOnly ? 'password' : 'new password'}</span>
           <div className="login-input-wrap">
             <input type="password" value={pw} onChange={e => setPw(e.target.value)} placeholder="••••••••" disabled={disabled || busy} />
           </div>
         </label>
         <label className="login-field" style={{marginTop:10}}>
-          <span className="login-label">confirm new password</span>
+          <span className="login-label">{deviceOnly ? 'confirm password' : 'confirm new password'}</span>
           <div className="login-input-wrap">
             <input type="password" value={pw2} onChange={e => setPw2(e.target.value)} placeholder="••••••••" disabled={disabled || busy}
               onKeyDown={e => { if (e.key === 'Enter') changePassword(); }} />
           </div>
         </label>
         {err  && <div className="login-err" style={{marginTop:8}}>{err}</div>}
-        {done && <div className="acct-ok" style={{marginTop:8}}>password changed ✓ — on next cold start, unlock this device with the new password.</div>}
+        {done && (
+          <div className="acct-ok" style={{marginTop:8}}>
+            password set ✓ — sign in with it on any other device, using {session?.mxid || 'your matrix id'}.
+          </div>
+        )}
         <div className="acct-actions">
           <button className="login-primary" disabled={disabled || busy} onClick={changePassword}>
-            {busy ? 'updating…' : 'change password'}
+            {busy ? 'updating…' : (deviceOnly ? 'add password' : 'change password')}
           </button>
         </div>
       </div>

@@ -17,6 +17,13 @@ Status: **partially implemented.**
 - **Phases 3–4 — the `.enc` wire format replacing megolm for live sends**:
   not yet. Rooms remain megolm for transport; the block chain is the
   durability layer beneath them. §6 epoch rotation: not yet (single epoch 0).
+- **Link sharing + the deferred password** (§4a, §7a): implemented
+  (`src/invitelink.js`, `src/device.js`, `claimInvite()`/
+  `setAccountPassword()` in `src/main.js`, vault meta v2 in
+  `src/vault.js`; tested in `test/invite-link.test.mjs` and
+  `test/vault-rekey.test.mjs`). A recipient gets access without knowingly
+  creating an account; the password only appears when they want a second
+  device, and changing it re-wraps keys rather than re-encrypting data.
 
 ## Why this exists
 
@@ -182,6 +189,70 @@ m_pub)`; `wk = HKDF-SHA256(shared)`; `ct = AES-GCM(wk, WCK)`; store
 `{eph_pub: E_pub, iv, ct}`. Recipient: `shared = ECDH(m_priv, E_pub)` → same
 `wk` → unwrap.
 
+## 4a. Sharing a room by link (implemented)
+
+§4 assumes both parties are already members with published identity keys.
+Sharing a link to someone who has *no account at all* is a different
+problem, and the constraint that shapes it is a Matrix auth rule: a state
+event whose `state_key` starts with `@` can only be sent by that user. So
+a member cannot pre-publish a `member_key` on a newcomer's behalf, and
+therefore **cannot pre-grant the WCK to an account that has not opened
+the app yet**. `grantWorkspaceKey()` only runs when an existing member
+next opens the room — which may be days.
+
+The flow (`src/invitelink.js`, `claimInvite()` in `src/main.js`,
+`public/invite-view.jsx`):
+
+1. The sharer's client mints an account with `register()` (a throwaway
+   client — their own session is untouched), invites it, and builds a
+   `#welcome=` link. The payload rides in the URL **fragment**, which
+   browsers never send to a server.
+2. The payload carries two secrets doing different jobs:
+   - **`p`, a one-time account password.** *Spent on first open:* the
+     claiming device immediately rotates it to a random device secret and
+     stores that vault-encrypted. A forwarded copy of the link can no
+     longer sign in.
+   - **`k`, the room's WCK.** A read capability for the workspace's
+     history — this is the concession that closes the pre-grant hole
+     above. It is not spendable (it is the same key every member holds),
+     so **revocation is epoch rotation, §6**. The share UI says this in
+     as many words: *"treat this like a key, not a notification."*
+3. The recipient sees one screen: a name field. `claimInvite()` does the
+   rest — rotate, adopt `k`, publish their own `member_key`, self-wrap
+   the WCK into their `<ns>.wkey` so §3 recovery works from then on, set
+   the display name, join.
+
+### The password arrives later
+
+A claimed account authenticates with a device-held secret, so its owner
+has no password and never chose to have an account. That is deliberate,
+and it has an unavoidable cost: **an account with no password cannot be
+recovered off the device that claimed it.** The design's answer is to be
+early and honest rather than to pretend otherwise —
+
+- a dismissible strip after a few edits (not on arrival, never a modal);
+- an immediate, louder one when `navigator.storage.persisted()` is false,
+  because there the account really can vanish on its own;
+- a confirm on sign-out, which is otherwise a silent one-way door;
+- `<ns>.member_status` (state_key = own mxid, self-reported because
+  nobody can observe another user's devices) so the sharer can see who is
+  one lost phone away from losing access;
+- plain copy at the dead end, instead of a login form that cannot succeed.
+
+`setAccountPassword()` then rotates three things, and **no room data is
+re-encrypted by any of them**:
+
+| what | why | cost |
+|---|---|---|
+| homeserver password | so another device can authenticate at all | one API call |
+| vault wrapping (§7a) | so this device's cache opens under it | re-wrap 32 bytes |
+| envelope identity (§1) | AK changes, so `wrapped_priv` is rewritten | re-wrap one key |
+
+The WCK is wrapped to the **identity**, not to the password, so the
+password sits at the top of the chain with nothing below it needing to
+move. That is the whole point of the hierarchy in §1, stated as a
+product property: *the password can change, cheaply, forever.*
+
 ## 5. Access control
 Unchanged and orthogonal: Matrix room membership + power levels still gate who
 can join and post. Encryption only changes *who can read the bytes*. Someone
@@ -202,6 +273,27 @@ events (the receive path decrypts before `store.append`, exactly as it does
 after a megolm decrypt today), and the vault keeps encrypting those bytes at
 rest. Undecryptable events are still simply skipped, so a missing WCK degrades
 gracefully (blank until the key arrives) instead of corrupting the store.
+
+## 7a. Vault meta v2 — the same indirection, locally
+
+`src/vault.js` originally derived the local at-rest data key *directly*
+from the password, which made the above false on-device: a password
+change orphaned every cached byte (the old `login()` path wiped the vault
+and re-synced). Meta v2 applies the §1 pattern one level down:
+
+```
+password ──PBKDF2(salt)──▶ wrapping key ──unwraps──▶ master key ──▶ OPFS / outbox / secrets
+```
+
+The master key is random and never changes; the verifier is sealed under
+it, so the resume stash verifies through the same path. `unlock()`
+migrates a v1 vault in place by **promoting the existing password-derived
+key to master** — minting a fresh one would orphan exactly the data the
+migration exists to rescue. Covered by `test/vault-rekey.test.mjs`.
+
+Note this only helps the device doing the change. A *different* device
+still holds meta sealed under the old password and re-syncs on its next
+login, as before.
 
 ## 8. What we delete
 - `m.room.encryption` from `createRoom`; `confirmEncryption`/`prepareToEncrypt`.
