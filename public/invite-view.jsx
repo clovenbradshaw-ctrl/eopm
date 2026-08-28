@@ -27,11 +27,26 @@
  * needed. "viewer" is a negative power level, which the homeserver
  * itself enforces (every operator event requires PL >= 0 to send) —
  * not a client-side convention that a modified client could ignore.
+ *
+ * Access according to the inviter: the homeserver also enforces who may
+ * invite at all and who may grant which power level (you can't hand out
+ * a level >= your own, and inviting itself needs a minimum level). Both
+ * tabs read ML.getInviteCapability(roomId) and only ever offer a role
+ * ML.canGrantLevel() says this inviter can actually deliver — and if the
+ * power-level grant is rejected anyway (a race, or a stale UI), they fall
+ * back to reporting the ACTUAL role granted rather than the one requested.
+ * Without this, a low-privilege inviter's "viewer" request could silently
+ * land as full editor access while the UI still claimed "invited as
+ * viewer" — see permissions.js for the underlying power-level math.
  */
 (function () {
 const { useState, useEffect, useRef } = React;
 
 const ROLE_PL = { viewer: -1, editor: 0 };
+const ROLE_DEFS = [
+  ['editor', 'Editor', 'Full access — can create and change anything in this project.'],
+  ['viewer', 'Viewer', "Read-only — the homeserver itself rejects their writes, not just the UI."],
+];
 const DEFAULT_HOMESERVER = 'hyphae.social';
 
 async function copyText(text) {
@@ -57,11 +72,10 @@ const btnStyle = (primary) => ({
   display: 'inline-flex', alignItems: 'center', gap: 6,
 });
 
-function RolePicker({ role, setRole }) {
+function RolePicker({ role, setRole, roles }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginBottom: 10 }}>
-      {[['editor', 'Editor', 'Full access — can create and change anything in this project.'],
-        ['viewer', 'Viewer', "Read-only — the homeserver itself rejects their writes, not just the UI."]].map(([val, label, desc]) => (
+      {ROLE_DEFS.filter(([val]) => roles.includes(val)).map(([val, label, desc]) => (
         <label key={val} style={{ display: 'flex', alignItems: 'flex-start', gap: 7, cursor: 'pointer', border: '1px solid ' + (role === val ? 'var(--border-strong)' : 'var(--border)'), background: role === val ? 'var(--surface-2, transparent)' : 'transparent', padding: '6px 8px' }}>
           <input type="radio" name="invite-role" checked={role === val} onChange={() => setRole(val)} style={{ marginTop: 3, flex: '0 0 auto' }} />
           <span style={{ minWidth: 0 }}>
@@ -136,15 +150,16 @@ function EmailSendRow({ email, setEmail }) {
   );
 }
 
-function NewGuestTab({ roomId, roomTitle, session, state, onEmit }) {
+function NewGuestTab({ roomId, roomTitle, session, state, onEmit, availableRoles }) {
   const [name, setName] = useState('');
-  const [role, setRole] = useState('editor');
+  const [role, setRole] = useState(() => availableRoles.includes('editor') ? 'editor' : availableRoles[0]);
   const [homeserver, setHomeserver] = useState(DEFAULT_HOMESERVER);
   const [token, setToken] = useState('');
   const [needToken, setNeedToken] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [link, setLink] = useState(null);
+  const [roleWarning, setRoleWarning] = useState('');
   const [email, setEmail] = useState('');
   const [emailStatus, setEmailStatus] = useState(null); // 'sending' | 'sent' | {error}
   const ML = window.MatrixLive;
@@ -153,34 +168,60 @@ function NewGuestTab({ roomId, roomTitle, session, state, onEmit }) {
     const who = name.trim();
     if (busy) return;
     if (!who) { setErr("Add a name so everyone knows who this is."); return; }
-    setBusy(true); setErr(''); setLink(null); setEmailStatus(null);
-    try {
-      const acct = await ML.register(homeserver.trim(), { seed: who, registrationToken: token.trim() || undefined });
-      try { await ML.inviteUser(roomId, acct.mxid); } catch (e) { /* best-effort; the link still works once they land */ }
-      if (ROLE_PL[role] < 0) { try { await ML.setUserPowerLevel(roomId, acct.mxid, ROLE_PL[role]); } catch (e) {} }
-      const url = ML.buildInviteLink({ v: 1, hs: acct.domain, u: acct.localpart, p: acct.password, r: roomId, rt: roomTitle, n: who, role, by: session?.mxid });
-      setLink({ url, mxid: acct.mxid, name: who }); setNeedToken(false);
+    setBusy(true); setErr(''); setLink(null); setEmailStatus(null); setRoleWarning('');
 
-      const to = email.trim();
-      if (to && ML.getEmailConfig().canSend) {
-        setEmailStatus('sending');
-        try {
-          await ML.sendEmail({
-            to, subject: `You're invited to ${roomTitle || 'a project'}`,
-            html: `<p>Hi ${who},</p><p>You've been invited to <b>${roomTitle || 'a project'}</b> as ${role === 'viewer' ? 'a viewer' : 'an editor'}.</p><p><a href="${url}">${url}</a></p><p style="color:#888;font-size:12px">This link logs you straight in — no account setup needed.</p>`,
-          });
-          setEmailStatus('sent');
-          // Record the mapping so anyone can reach this person later (the
-          // bulk "update" sender looks recipients up here) without having
-          // to re-type an address someone already gave once.
-          if (window.PeopleDirectory && state && onEmit) {
-            window.PeopleDirectory.setPersonEmail(onEmit, window.MatrixEngine, state, acct.mxid, to, who).catch(() => {});
-          }
-        } catch (e) { setEmailStatus({ error: e?.message || 'Email failed to send.' }); }
-      }
+    let acct;
+    try {
+      acct = await ML.register(homeserver.trim(), { seed: who, registrationToken: token.trim() || undefined });
     } catch (e) {
       if (e && e.code === 'uia' && /registration token/i.test(e.message || '')) { setNeedToken(true); setErr(e.message); }
       else setErr((e && e.message) || "Couldn't create that account.");
+      setBusy(false);
+      return;
+    }
+
+    // Not best-effort: for a private room this IS the access grant. A guest
+    // whose invite silently failed gets a link that can never join, while
+    // the panel below would otherwise still claim success.
+    try {
+      await ML.inviteUser(roomId, acct.mxid);
+    } catch (e) {
+      setErr(`Account created (${acct.mxid}), but inviting them into the project failed: ${e?.message || 'unknown error'}. Try "existing member" with that ID once you have permission to invite.`);
+      setBusy(false);
+      return;
+    }
+
+    // Report what was actually granted, not what was requested — a denied
+    // power-level change leaves the guest at the room default (editor),
+    // which is MORE access than "viewer" promised, not less.
+    let grantedRole = role;
+    if (ROLE_PL[role] < 0) {
+      try { await ML.setUserPowerLevel(roomId, acct.mxid, ROLE_PL[role]); }
+      catch (e) {
+        grantedRole = 'editor';
+        setRoleWarning(`Couldn't restrict this to viewer (${e?.message || "you don't have permission to set roles here"}) — they have editor access instead.`);
+      }
+    }
+
+    const url = ML.buildInviteLink({ v: 1, hs: acct.domain, u: acct.localpart, p: acct.password, r: roomId, rt: roomTitle, n: who, role: grantedRole, by: session?.mxid });
+    setLink({ url, mxid: acct.mxid, name: who, role: grantedRole }); setNeedToken(false);
+
+    const to = email.trim();
+    if (to && ML.getEmailConfig().canSend) {
+      setEmailStatus('sending');
+      try {
+        await ML.sendEmail({
+          to, subject: `You're invited to ${roomTitle || 'a project'}`,
+          html: `<p>Hi ${who},</p><p>You've been invited to <b>${roomTitle || 'a project'}</b> as ${grantedRole === 'viewer' ? 'a viewer' : 'an editor'}.</p><p><a href="${url}">${url}</a></p><p style="color:#888;font-size:12px">This link logs you straight in — no account setup needed.</p>`,
+        });
+        setEmailStatus('sent');
+        // Record the mapping so anyone can reach this person later (the
+        // bulk "update" sender looks recipients up here) without having
+        // to re-type an address someone already gave once.
+        if (window.PeopleDirectory && state && onEmit) {
+          window.PeopleDirectory.setPersonEmail(onEmit, window.MatrixEngine, state, acct.mxid, to, who).catch(() => {});
+        }
+      } catch (e) { setEmailStatus({ error: e?.message || 'Email failed to send.' }); }
     }
     setBusy(false);
   }
@@ -188,13 +229,14 @@ function NewGuestTab({ roomId, roomTitle, session, state, onEmit }) {
   if (link) return (
     <div>
       <div style={{ fontSize: 11.5, color: 'var(--green)', marginBottom: 8, lineHeight: 1.4 }}>
-        Account created for <b>{link.name}</b> (<code>{link.mxid}</code>) · invited as {role}. Send them this link:
+        Account created for <b>{link.name}</b> (<code>{link.mxid}</code>) · invited as {link.role}. Send them this link:
       </div>
+      {roleWarning && <div style={{ fontSize: 10.5, color: 'var(--red)', marginBottom: 8, lineHeight: 1.4 }}>{roleWarning}</div>}
       <LinkOut url={link.url} note="Carries a one-time password — it stops working once they set their own. Share it privately." />
       {emailStatus === 'sending' && <div style={{ fontSize: 10.5, color: 'var(--text-faint)', marginTop: 8, display: 'flex', alignItems: 'center', gap: 6 }}><Spinner size={10} /> emailing {email}…</div>}
       {emailStatus === 'sent' && <div style={{ fontSize: 10.5, color: 'var(--green)', marginTop: 8 }}><i className="ph ph-check" aria-hidden="true"></i> emailed to {email}</div>}
       {emailStatus?.error && <div style={{ fontSize: 10.5, color: 'var(--red)', marginTop: 8 }}>couldn't email it: {emailStatus.error} — the link above still works.</div>}
-      <button style={{ ...btnStyle(false), marginTop: 10 }} onClick={() => { setLink(null); setEmailStatus(null); }}>invite another</button>
+      <button style={{ ...btnStyle(false), marginTop: 10 }} onClick={() => { setLink(null); setEmailStatus(null); setRoleWarning(''); }}>invite another</button>
     </div>
   );
 
@@ -207,7 +249,11 @@ function NewGuestTab({ roomId, roomTitle, session, state, onEmit }) {
       <label style={{ fontSize: 10.5, color: 'var(--text-faint)', display: 'block', marginBottom: 4 }}>who's this for?</label>
       <input value={name} onChange={e => { setName(e.target.value); setErr(''); }} onKeyDown={e => e.key === 'Enter' && create()}
         placeholder="e.g. Sam Rivera" style={{ ...fieldStyle, marginBottom: 8 }} />
-      <RolePicker role={role} setRole={setRole} />
+      {availableRoles.length > 1
+        ? <RolePicker role={role} setRole={setRole} roles={availableRoles} />
+        : <div style={{ fontSize: 11, color: 'var(--text-faint)', marginBottom: 10, lineHeight: 1.4 }}>
+            They'll get <b>{availableRoles[0]}</b> access — you don't have permission to grant any other role in this project.
+          </div>}
       <label style={{ fontSize: 10.5, color: 'var(--text-faint)', display: 'block', marginBottom: 4 }}>homeserver</label>
       <input value={homeserver} onChange={e => setHomeserver(e.target.value)} placeholder="hyphae.social" style={{ ...fieldStyle, marginBottom: 8 }} />
       {needToken && (
@@ -222,12 +268,13 @@ function NewGuestTab({ roomId, roomTitle, session, state, onEmit }) {
   );
 }
 
-function ExistingMemberTab({ roomId, roomTitle, state, onEmit }) {
+function ExistingMemberTab({ roomId, roomTitle, state, onEmit, availableRoles }) {
   const [mxid, setMxid] = useState('');
-  const [role, setRole] = useState('editor');
+  const [role, setRole] = useState(() => availableRoles.includes('editor') ? 'editor' : availableRoles[0]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [link, setLink] = useState(null);
+  const [roleWarning, setRoleWarning] = useState('');
   const [email, setEmail] = useState('');
   const [emailStatus, setEmailStatus] = useState(null);
   const ML = window.MatrixLive;
@@ -236,41 +283,58 @@ function ExistingMemberTab({ roomId, roomTitle, state, onEmit }) {
     const id = mxid.trim();
     if (busy) return;
     if (!/^@[^:\s]+:[^\s]+$/.test(id)) { setErr('Needs a full Matrix ID, like @name:server'); return; }
-    setBusy(true); setErr(''); setLink(null); setEmailStatus(null);
+    setBusy(true); setErr(''); setLink(null); setEmailStatus(null); setRoleWarning('');
+
     try {
       await ML.inviteUser(roomId, id);
-      if (ROLE_PL[role] < 0) { try { await ML.setUserPowerLevel(roomId, id, ROLE_PL[role]); } catch (e) {} }
-      const url = ML.buildJoinLink({ r: roomId, rt: roomTitle });
-      setLink({ url, mxid: id });
+    } catch (e) {
+      setErr((e && e.message) || "Couldn't send that invite.");
+      setBusy(false);
+      return;
+    }
 
-      const to = email.trim();
-      if (to && ML.getEmailConfig().canSend) {
-        setEmailStatus('sending');
-        try {
-          await ML.sendEmail({
-            to, subject: `You're invited to ${roomTitle || 'a project'}`,
-            html: `<p>Hi,</p><p>You've been invited to <b>${roomTitle || 'a project'}</b> as ${role === 'viewer' ? 'a viewer' : 'an editor'} (${id}).</p><p><a href="${url}">${url}</a></p><p style="color:#888;font-size:12px">Sign in with your own account and this link drops you straight into the project.</p>`,
-          });
-          setEmailStatus('sent');
-          if (window.PeopleDirectory && state && onEmit) {
-            window.PeopleDirectory.setPersonEmail(onEmit, window.MatrixEngine, state, id, to, null).catch(() => {});
-          }
-        } catch (e) { setEmailStatus({ error: e?.message || 'Email failed to send.' }); }
+    // Report what was actually granted, not what was requested — see the
+    // matching comment in NewGuestTab.create().
+    let grantedRole = role;
+    if (ROLE_PL[role] < 0) {
+      try { await ML.setUserPowerLevel(roomId, id, ROLE_PL[role]); }
+      catch (e) {
+        grantedRole = 'editor';
+        setRoleWarning(`Couldn't restrict this to viewer (${e?.message || "you don't have permission to set roles here"}) — they have editor access instead.`);
       }
-    } catch (e) { setErr((e && e.message) || "Couldn't send that invite."); }
+    }
+
+    const url = ML.buildJoinLink({ r: roomId, rt: roomTitle });
+    setLink({ url, mxid: id, role: grantedRole });
+
+    const to = email.trim();
+    if (to && ML.getEmailConfig().canSend) {
+      setEmailStatus('sending');
+      try {
+        await ML.sendEmail({
+          to, subject: `You're invited to ${roomTitle || 'a project'}`,
+          html: `<p>Hi,</p><p>You've been invited to <b>${roomTitle || 'a project'}</b> as ${grantedRole === 'viewer' ? 'a viewer' : 'an editor'} (${id}).</p><p><a href="${url}">${url}</a></p><p style="color:#888;font-size:12px">Sign in with your own account and this link drops you straight into the project.</p>`,
+        });
+        setEmailStatus('sent');
+        if (window.PeopleDirectory && state && onEmit) {
+          window.PeopleDirectory.setPersonEmail(onEmit, window.MatrixEngine, state, id, to, null).catch(() => {});
+        }
+      } catch (e) { setEmailStatus({ error: e?.message || 'Email failed to send.' }); }
+    }
     setBusy(false);
   }
 
   if (link) return (
     <div>
       <div style={{ fontSize: 11.5, color: 'var(--green)', marginBottom: 8, lineHeight: 1.4 }}>
-        Invited <b>{link.mxid}</b> as {role}. This link drops them straight into the project once they sign in:
+        Invited <b>{link.mxid}</b> as {link.role}. This link drops them straight into the project once they sign in:
       </div>
+      {roleWarning && <div style={{ fontSize: 10.5, color: 'var(--red)', marginBottom: 8, lineHeight: 1.4 }}>{roleWarning}</div>}
       <LinkOut url={link.url} note="No password in this one — safe to share more casually. They sign in with their own account." />
       {emailStatus === 'sending' && <div style={{ fontSize: 10.5, color: 'var(--text-faint)', marginTop: 8, display: 'flex', alignItems: 'center', gap: 6 }}><Spinner size={10} /> emailing {email}…</div>}
       {emailStatus === 'sent' && <div style={{ fontSize: 10.5, color: 'var(--green)', marginTop: 8 }}><i className="ph ph-check" aria-hidden="true"></i> emailed to {email}</div>}
       {emailStatus?.error && <div style={{ fontSize: 10.5, color: 'var(--red)', marginTop: 8 }}>couldn't email it: {emailStatus.error} — the link above still works.</div>}
-      <button style={{ ...btnStyle(false), marginTop: 10 }} onClick={() => { setLink(null); setEmailStatus(null); }}>invite another</button>
+      <button style={{ ...btnStyle(false), marginTop: 10 }} onClick={() => { setLink(null); setEmailStatus(null); setRoleWarning(''); }}>invite another</button>
     </div>
   );
 
@@ -282,7 +346,11 @@ function ExistingMemberTab({ roomId, roomTitle, state, onEmit }) {
       <label style={{ fontSize: 10.5, color: 'var(--text-faint)', display: 'block', marginBottom: 4 }}>their matrix id</label>
       <input value={mxid} onChange={e => { setMxid(e.target.value); setErr(''); }} onKeyDown={e => e.key === 'Enter' && send()}
         placeholder="@name:hyphae.social" style={{ ...fieldStyle, marginBottom: 8 }} />
-      <RolePicker role={role} setRole={setRole} />
+      {availableRoles.length > 1
+        ? <RolePicker role={role} setRole={setRole} roles={availableRoles} />
+        : <div style={{ fontSize: 11, color: 'var(--text-faint)', marginBottom: 10, lineHeight: 1.4 }}>
+            They'll get <b>{availableRoles[0]}</b> access — you don't have permission to grant any other role in this project.
+          </div>}
       <EmailSendRow email={email} setEmail={setEmail} />
       <button style={btnStyle(true)} disabled={busy} onClick={send}>
         {busy ? <Spinner /> : <i className="ph ph-paper-plane-tilt" aria-hidden="true"></i>}{busy ? 'sending…' : 'send invite'}
@@ -294,6 +362,11 @@ function ExistingMemberTab({ roomId, roomTitle, state, onEmit }) {
 
 function InvitePanel({ roomId, roomTitle, session, state, onEmit, onClose }) {
   const [tab, setTab] = useState('new');
+  const ML = window.MatrixLive;
+  // Read fresh on every render (cheap in-memory state read, no network) so
+  // a permission change while the dialog happens to be open isn't stale.
+  const cap = ML.getInviteCapability(roomId);
+  const availableRoles = ['editor', 'viewer'].filter(r => ML.canGrantLevel(cap, ROLE_PL[r]));
   return (
     <div style={{ position: 'fixed', inset: 0, zIndex: 500, background: 'rgba(0,0,0,.35)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }} onClick={onClose}>
       <div style={{ width: 'min(420px, 100%)', background: 'var(--surface)', border: '1px solid var(--border-strong)', boxShadow: '0 8px 30px rgba(0,0,0,.25)' }} onClick={e => e.stopPropagation()}>
@@ -303,15 +376,23 @@ function InvitePanel({ roomId, roomTitle, session, state, onEmit, onClose }) {
             <i className="ph ph-x" aria-hidden="true"></i>
           </button>
         </div>
-        <div style={{ display: 'flex', borderBottom: '1px solid var(--border)' }}>
-          <button onClick={() => setTab('new')} style={{ flex: 1, padding: '8px 0', fontSize: 11.5, border: 'none', borderBottom: '2px solid ' + (tab === 'new' ? 'var(--text)' : 'transparent'), background: 'none', cursor: 'pointer', color: tab === 'new' ? 'var(--text)' : 'var(--text-faint)' }}>new guest</button>
-          <button onClick={() => setTab('existing')} style={{ flex: 1, padding: '8px 0', fontSize: 11.5, border: 'none', borderBottom: '2px solid ' + (tab === 'existing' ? 'var(--text)' : 'transparent'), background: 'none', cursor: 'pointer', color: tab === 'existing' ? 'var(--text)' : 'var(--text-faint)' }}>existing member</button>
-        </div>
-        <div style={{ padding: 14 }}>
-          {tab === 'new'
-            ? <NewGuestTab roomId={roomId} roomTitle={roomTitle} session={session} state={state} onEmit={onEmit} />
-            : <ExistingMemberTab roomId={roomId} roomTitle={roomTitle} state={state} onEmit={onEmit} />}
-        </div>
+        {!cap.canInvite ? (
+          <div style={{ padding: 14, fontSize: 12, color: 'var(--text-dim)', lineHeight: 1.5 }}>
+            You don't have permission to invite people to {roomTitle || 'this project'} — ask an editor or the project owner.
+          </div>
+        ) : (
+          <>
+            <div style={{ display: 'flex', borderBottom: '1px solid var(--border)' }}>
+              <button onClick={() => setTab('new')} style={{ flex: 1, padding: '8px 0', fontSize: 11.5, border: 'none', borderBottom: '2px solid ' + (tab === 'new' ? 'var(--text)' : 'transparent'), background: 'none', cursor: 'pointer', color: tab === 'new' ? 'var(--text)' : 'var(--text-faint)' }}>new guest</button>
+              <button onClick={() => setTab('existing')} style={{ flex: 1, padding: '8px 0', fontSize: 11.5, border: 'none', borderBottom: '2px solid ' + (tab === 'existing' ? 'var(--text)' : 'transparent'), background: 'none', cursor: 'pointer', color: tab === 'existing' ? 'var(--text)' : 'var(--text-faint)' }}>existing member</button>
+            </div>
+            <div style={{ padding: 14 }}>
+              {tab === 'new'
+                ? <NewGuestTab roomId={roomId} roomTitle={roomTitle} session={session} state={state} onEmit={onEmit} availableRoles={availableRoles} />
+                : <ExistingMemberTab roomId={roomId} roomTitle={roomTitle} state={state} onEmit={onEmit} availableRoles={availableRoles} />}
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

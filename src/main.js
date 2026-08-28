@@ -33,7 +33,8 @@ import { createRoom as mxCreateRoom, discoverRooms, getTimeline, onTimeline,
          setMemberPowerLevel, onMembersChange, acceptInvite, onRoomChanges,
          onDecrypted, onLocalEchoUpdated, EventStatus,
          setName as mxSetRoomName, getDisplayName as mxGetDisplayName,
-         setDisplayName as mxSetDisplayName } from './rooms.js';
+         setDisplayName as mxSetDisplayName,
+         getInviteCapability, canGrantLevel } from './rooms.js';
 import { EventStore, requestPersistentStorage, getOpfsBreakdown, getCacheStorageUsage } from './store.js';
 import { vault, getLastUser, loadSecret, storeSecret, removeSecret } from './vault.js';
 import { OutboxFlusher, listAll as outboxListAll, pendingCount,
@@ -1807,6 +1808,12 @@ window.MatrixLive = {
   membersOf,
   loadMembers,
   myPowerLevelIn,
+  // What the current user can actually invite/grant in a room, read from
+  // the room's real power_levels rather than assumed — the invite dialog
+  // uses this to never offer (or silently downgrade to) a role the
+  // homeserver won't let the inviter deliver.
+  getInviteCapability,
+  canGrantLevel,
   getMyDisplayName,
   // File import / media
   importFile: importFileToRoom,

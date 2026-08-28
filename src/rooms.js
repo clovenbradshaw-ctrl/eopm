@@ -12,6 +12,7 @@
 import { getClient } from './client.js';
 import { getNamespace } from './operators.js';
 import { ClientEvent, MatrixEventEvent, RoomEvent, RoomStateEvent, EventStatus } from 'matrix-js-sdk';
+import { inviteCapabilityFromPowerLevels, canGrantLevel } from './permissions.js';
 
 const META_TYPE = () => `${getNamespace()}.meta`;
 
@@ -492,6 +493,28 @@ export function myPowerLevel(roomId) {
   const def = typeof c.users_default === 'number' ? c.users_default : 0;
   return typeof u[me] === 'number' ? u[me] : def;
 }
+
+/**
+ * What the current user can do re: inviting + granting access in this
+ * room — derived from the room's actual m.room.power_levels content, not
+ * assumed defaults. The invite UI uses this to only ever offer (and only
+ * ever promise) a role the homeserver will actually let the inviter grant;
+ * see permissions.js for why that matters.
+ *
+ * @param {string} roomId
+ * @returns {{ myLevel: number, usersDefault: number, canInvite: boolean, maxSettableLevel: number }}
+ */
+export function getInviteCapability(roomId) {
+  const noCap = { myLevel: 0, usersDefault: 0, canInvite: false, maxSettableLevel: -Infinity };
+  const client = getClient();
+  if (!client) return noCap;
+  const room = client.getRoom(roomId);
+  if (!room) return noCap;
+  const plEvent = room.currentState.getStateEvents('m.room.power_levels', '');
+  return inviteCapabilityFromPowerLevels(plEvent?.getContent(), client.getUserId());
+}
+
+export { canGrantLevel };
 
 /**
  * Kick a user out of the room.
