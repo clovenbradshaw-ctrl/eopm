@@ -154,20 +154,39 @@ const FUNCS = {
   ARRAYFLATTEN: (...a) => flatten(a),
   ARRAYUNIQUE:  (...a) => Array.from(new Set(flatten(a))),
 
-  // dates — return Date objects so chained fns work; stringify at the edge
-  TODAY:  () => new Date().toISOString().slice(0, 10),
+  // dates — every read goes through dateParts()/dayStart() (see the note by
+  // them): date-only values are read in UTC, instants in the local zone.
+  // Day-granularity functions hand back date-only strings, the same shape the
+  // date fields themselves carry, so chains stay in one lane.
+  TODAY:  () => isoDay(dayStart(new Date())),
   NOW:    () => new Date().toISOString(),
-  YEAR:   d => new Date(d).getFullYear(),
-  MONTH:  d => new Date(d).getMonth() + 1,
-  DAY:    d => new Date(d).getDate(),
-  HOUR:   d => new Date(d).getHours(),
-  MINUTE: d => new Date(d).getMinutes(),
-  SECOND: d => new Date(d).getSeconds(),
-  WEEKDAY: (d) => new Date(d).getDay(), // 0=Sunday
+  YEAR:   d => dateParts(d).year,
+  MONTH:  d => dateParts(d).month + 1,
+  DAY:    d => dateParts(d).day,
+  HOUR:   d => dateParts(d).hour,
+  MINUTE: d => dateParts(d).minute,
+  SECOND: d => dateParts(d).second,
+  WEEKDAY: (d) => dateParts(d).weekday, // 0=Sunday
   DATEADD: (d, amount, unit = 'days') => {
-    const date = new Date(d);
     const n = num(amount);
-    switch (String(unit).toLowerCase()) {
+    const unitName = String(unit).toLowerCase();
+    // A date-only value plus a whole-day-or-larger step is calendar math: do it
+    // in UTC, where a DST transition can't knock the result an hour (and so a
+    // day) sideways, and return a date-only string. Sub-day steps and instants
+    // fall through to local wall-clock stepping.
+    if (isDateOnly(d) && unitName !== 'seconds' && unitName !== 'minutes' && unitName !== 'hours') {
+      const day = dayStart(d);
+      if (isNaN(day.getTime())) return '';
+      switch (unitName) {
+        case 'weeks':  day.setUTCDate(day.getUTCDate() + n * 7); break;
+        case 'months': day.setUTCMonth(day.getUTCMonth() + n); break;
+        case 'years':  day.setUTCFullYear(day.getUTCFullYear() + n); break;
+        default:       day.setUTCDate(day.getUTCDate() + n);
+      }
+      return isoDay(day);
+    }
+    const date = toDate(d);
+    switch (unitName) {
       case 'seconds': date.setSeconds(date.getSeconds() + n); break;
       case 'minutes': date.setMinutes(date.getMinutes() + n); break;
       case 'hours':   date.setHours(date.getHours() + n); break;
@@ -179,12 +198,17 @@ const FUNCS = {
     }
     return date.toISOString();
   },
-  DATESTR: d => d ? new Date(d).toISOString().slice(0, 10) : '',
-  TIMESTR: d => d ? new Date(d).toISOString().slice(11, 19) : '',
-  DATETIME_FORMAT: (d, fmt = 'YYYY-MM-DD') => formatDate(new Date(d), stringify(fmt)),
+  DATESTR: d => d ? isoDay(dayStart(d)) : '',
+  TIMESTR: d => {
+    const p = d ? dateParts(d) : null;
+    if (!p || isNaN(p.hour)) return '';
+    const pad = n => String(n).padStart(2, '0');
+    return `${pad(p.hour)}:${pad(p.minute)}:${pad(p.second)}`;
+  },
+  DATETIME_FORMAT: (d, fmt = 'YYYY-MM-DD') => formatDate(d, stringify(fmt)),
   DATETIME_PARSE:  (s) => { const t = Date.parse(stringify(s)); return isNaN(t) ? null : new Date(t).toISOString(); },
   DATETIME_DIFF:   (a, b, unit = 'days') => {
-    const diff = new Date(a).getTime() - new Date(b).getTime();
+    const diff = toDate(a).getTime() - toDate(b).getTime();
     switch (String(unit).toLowerCase()) {
       case 'milliseconds': return diff;
       case 'seconds': return diff / 1000;
@@ -195,23 +219,27 @@ const FUNCS = {
       default:        return diff / 86400000;
     }
   },
-  IS_BEFORE: (a, b) => new Date(a).getTime() < new Date(b).getTime(),
-  IS_AFTER:  (a, b) => new Date(a).getTime() > new Date(b).getTime(),
+  IS_BEFORE: (a, b) => toDate(a).getTime() < toDate(b).getTime(),
+  IS_AFTER:  (a, b) => toDate(a).getTime() > toDate(b).getTime(),
   IS_SAME:   (a, b, unit = 'milliseconds') => {
-    const aa = new Date(a), bb = new Date(b);
+    // Calendar comparisons read both sides through dateParts(), so a date-only
+    // value and an instant are compared by the day each one names.
+    const pa = dateParts(a), pb = dateParts(b);
+    if (isNaN(pa.year) || isNaN(pb.year)) return false;
     switch (String(unit).toLowerCase()) {
-      case 'year':  return aa.getFullYear() === bb.getFullYear();
-      case 'month': return aa.getFullYear() === bb.getFullYear() && aa.getMonth() === bb.getMonth();
-      case 'day':   return aa.toDateString() === bb.toDateString();
-      default:      return aa.getTime() === bb.getTime();
+      case 'year':  return pa.year === pb.year;
+      case 'month': return pa.year === pb.year && pa.month === pb.month;
+      case 'day':   return pa.year === pb.year && pa.month === pb.month && pa.day === pb.day;
+      default:      return toDate(a).getTime() === toDate(b).getTime();
     }
   },
-  FROMNOW: d => relTime(new Date(d), new Date(), false),
-  TONOW:   d => relTime(new Date(d), new Date(), false),
-  // Week-of-year: week 1 contains Jan 1, weeks counted from Sunday. UTC-based
-  // so the number doesn't drift with the viewer's timezone.
+  FROMNOW: d => relTime(toDate(d), new Date(), false),
+  TONOW:   d => relTime(toDate(d), new Date(), false),
+  // Week-of-year: week 1 contains Jan 1, weeks counted from Sunday. The day is
+  // resolved by dayStart() and the arithmetic runs in UTC, so a date-only value
+  // gives the same week number in every timezone.
   WEEKNUM: (d) => {
-    const date = new Date(d);
+    const date = dayStart(d);
     if (isNaN(date.getTime())) return 0;
     const jan1 = Date.UTC(date.getUTCFullYear(), 0, 1);
     const today = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
@@ -222,19 +250,19 @@ const FUNCS = {
   // string or array of dates). WORKDAY returns the Nth working day from a
   // start; WORKDAY_DIFF counts the working days in (start, end].
   WORKDAY: (d, n, holidays) => {
-    const date = new Date(d);
+    const date = dayStart(d);
     if (isNaN(date.getTime())) return '';
     const hol = new Set(dateList(holidays));
     const step = num(n) < 0 ? -1 : 1;
     let remaining = Math.abs(Math.trunc(num(n)));
     while (remaining > 0) {
-      date.setDate(date.getDate() + step);
+      date.setUTCDate(date.getUTCDate() + step);
       if (isWorkday(date, hol)) remaining--;
     }
-    return date.toISOString();
+    return isoDay(date);
   },
   WORKDAY_DIFF: (a, b, holidays) => {
-    let start = new Date(a), end = new Date(b);
+    let start = dayStart(a), end = dayStart(b);
     if (isNaN(start.getTime()) || isNaN(end.getTime())) return 0;
     let sign = 1;
     if (start.getTime() > end.getTime()) { const t = start; start = end; end = t; sign = -1; }
@@ -243,10 +271,10 @@ const FUNCS = {
     // so WORKDAY_DIFF(d, WORKDAY(d, n)) === n. Same working day → 0.
     const cur = new Date(start);
     let count = 0;
-    cur.setDate(cur.getDate() + 1);
+    cur.setUTCDate(cur.getUTCDate() + 1);
     while (cur.getTime() <= end.getTime()) {
       if (isWorkday(cur, hol)) count++;
-      cur.setDate(cur.getDate() + 1);
+      cur.setUTCDate(cur.getUTCDate() + 1);
     }
     return sign * count;
   },
@@ -616,19 +644,51 @@ function stringify(v) {
   return String(v);
 }
 
+// ── Two kinds of date value ─────────────────────────────────────────────────
+// A date-only string ("2026-01-15" — what <input type=date> and smartParseDate
+// store in date fields) names a calendar day and carries no timezone; JS parses
+// it as UTC midnight, so reading it back with local getters lands on the
+// PREVIOUS day west of UTC. An instant (ISO timestamp or epoch ms) names a
+// moment, which the viewer reads in their own zone. So: date-only values are
+// read in UTC, instants locally — the same split public/table-view.jsx makes
+// when it renders a date cell.
+const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
+function isDateOnly(v) { return typeof v === 'string' && DATE_ONLY_RE.test(v.trim()); }
+function toDate(v) {
+  if (v instanceof Date) return new Date(v.getTime());
+  return new Date(typeof v === 'string' ? v.trim() : v);
+}
+// The clock/calendar parts a value denotes, read in the right zone for its kind.
+function dateParts(v) {
+  const d = toDate(v);
+  if (isNaN(d.getTime())) return { year: NaN, month: NaN, day: NaN, hour: NaN, minute: NaN, second: NaN, weekday: NaN };
+  return isDateOnly(v)
+    ? { year: d.getUTCFullYear(), month: d.getUTCMonth(),  day: d.getUTCDate(),
+        hour: d.getUTCHours(),    minute: d.getUTCMinutes(), second: d.getUTCSeconds(), weekday: d.getUTCDay() }
+    : { year: d.getFullYear(),    month: d.getMonth(),     day: d.getDate(),
+        hour: d.getHours(),       minute: d.getMinutes(),  second: d.getSeconds(),    weekday: d.getDay() };
+}
+// The calendar day a value names, anchored at UTC midnight. Day-granularity
+// math (WORKDAY, WEEKNUM, DATEADD by days) then runs entirely in UTC, where
+// every day is exactly 24h — no DST steps, no local-offset drift.
+function dayStart(v) {
+  const p = dateParts(v);
+  return new Date(isNaN(p.year) ? NaN : Date.UTC(p.year, p.month, p.day));
+}
+function isoDay(d) { return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10); }
+
 // Normalize a holidays argument (comma-separated string OR array of dates) to a
 // set-ready list of YYYY-MM-DD keys; unparseable entries are dropped.
 function dateList(v) {
   if (v === undefined || v === null || v === '') return [];
   const arr = Array.isArray(v) ? v : stringify(v).split(',');
-  return arr
-    .map(s => { const t = Date.parse(String(s).trim()); return isNaN(t) ? null : new Date(t).toISOString().slice(0, 10); })
-    .filter(Boolean);
+  return arr.map(s => isoDay(dayStart(typeof s === 'string' ? s.trim() : s))).filter(Boolean);
 }
 // A working day: not Sat/Sun and not in the holiday set (keyed YYYY-MM-DD).
+// Callers only ever pass dayStart() dates, so both reads here are UTC.
 function isWorkday(date, holidaySet) {
-  const day = date.getDay();
-  return day !== 0 && day !== 6 && !holidaySet.has(date.toISOString().slice(0, 10));
+  const day = date.getUTCDay();
+  return day !== 0 && day !== 6 && !holidaySet.has(isoDay(date));
 }
 // Round `value` to a multiple of `sig` (default 1) using `round` (Math.floor/
 // ceil), snapping off the float error the divide/multiply reintroduces
@@ -640,22 +700,25 @@ function snap(round, value, sig) {
 }
 
 // Minimal DATETIME_FORMAT — supports common tokens; not full moment grammar.
-function formatDate(d, fmt) {
-  if (isNaN(d.getTime())) return '';
+// Reads through dateParts(), so a date-only value formats as the day it names
+// instead of sliding back a day west of UTC.
+function formatDate(v, fmt) {
+  const p = dateParts(v);
+  if (isNaN(p.year)) return '';
   const pad = (n, w = 2) => String(n).padStart(w, '0');
   const map = {
-    YYYY: d.getFullYear(),
-    YY:   pad(d.getFullYear() % 100),
-    MM:   pad(d.getMonth() + 1),
-    M:    d.getMonth() + 1,
-    DD:   pad(d.getDate()),
-    D:    d.getDate(),
-    HH:   pad(d.getHours()),
-    H:    d.getHours(),
-    mm:   pad(d.getMinutes()),
-    m:    d.getMinutes(),
-    ss:   pad(d.getSeconds()),
-    s:    d.getSeconds(),
+    YYYY: p.year,
+    YY:   pad(p.year % 100),
+    MM:   pad(p.month + 1),
+    M:    p.month + 1,
+    DD:   pad(p.day),
+    D:    p.day,
+    HH:   pad(p.hour),
+    H:    p.hour,
+    mm:   pad(p.minute),
+    m:    p.minute,
+    ss:   pad(p.second),
+    s:    p.second,
   };
   return fmt.replace(/YYYY|YY|MM|M|DD|D|HH|H|mm|m|ss|s/g, (t) => String(map[t]));
 }
