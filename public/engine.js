@@ -461,10 +461,40 @@ function seedData() {
   return events;
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Archived sets
+//
+// Archiving a set is a schema fact, not a deletion: `_schema.archived` holds
+// the names of sets hidden from the default listing. It rides the same
+// encrypted log as everything else, so it syncs to every collaborator and
+// time-travels — scrub back and an archived set is right where it was.
+//
+// This is the set-level twin of a row's `_archived` DEF. Same promise in both
+// cases: the log is append-only, so nothing is ever destroyed; the set simply
+// stops showing up until you bring it back.
+// ─────────────────────────────────────────────────────────────────────────
+
+function archivedSets(state) {
+  const v = state?.schema?.archived;
+  return Array.isArray(v) ? v.filter(n => typeof n === 'string') : [];
+}
+
+function isArchivedSet(state, name) {
+  return archivedSets(state).includes(name);
+}
+
+/** The `_schema.archived` value that archives (or restores) one set. */
+function withArchivedSet(state, name, archived) {
+  const current = archivedSets(state);
+  if (archived) return current.includes(name) ? current : [...current, name];
+  return current.filter(n => n !== name);
+}
+
 window.MatrixEngine = {
   OP, STORED_OPS, ALL_OPS,
   setNamespace, eventType, parseEventType,
   cyrb53, makeAnchor,
   initial, fold, dispatch,
+  archivedSets, isArchivedSet, withArchivedSet,
   seedData,
 };
