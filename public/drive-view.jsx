@@ -339,12 +339,28 @@ function fmtTime(s) {
   return `${m}:${String(sec).padStart(2, '0')}`;
 }
 
-function transcribeStatusLabel(p) {
-  if (!p) return 'transcribing…';
-  if (p.status === 'decoding') return 'decoding audio…';
-  if (p.status === 'downloading') return `downloading speech model… ${p.pct != null ? p.pct + '%' : ''}`.trim();
-  if (p.status === 'transcribing') return 'transcribing…';
-  return 'starting…';
+function fmtElapsed(s) {
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
+}
+
+// `p.status` also arrives as 'initiate' / 'download' / 'progress_total' /
+// 'ready' — the transformers.js loader's other lifecycle events, fired
+// between the percentage-bearing 'progress' ticks transcribe-worker.js
+// already maps to 'downloading'. Folding those into the same label (rather
+// than falling through to a bare "starting…") stops the status line from
+// flickering back to "starting…" between real progress updates. Appending
+// elapsed time gives a running file (inference on a long recording can
+// take minutes with no percentage available) a visible sign of life
+// instead of sitting on a static "transcribing…" that reads as hung.
+function transcribeStatusLabel(p, elapsedS) {
+  let base;
+  if (!p) base = 'transcribing…';
+  else if (p.status === 'decoding') base = 'decoding audio…';
+  else if (p.status === 'downloading') base = `downloading speech model… ${p.pct != null ? p.pct + '%' : ''}`.trim();
+  else if (p.status === 'transcribing') base = 'transcribing…';
+  else base = 'downloading speech model…';
+  return elapsedS > 0 ? `${base} · ${fmtElapsed(elapsedS)}` : base;
 }
 
 /**
@@ -361,6 +377,7 @@ function AudioTranscript({ doc, ctx, audioRef }) {
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState(null);
   const [activeIdx, setActiveIdx] = useState(-1);
+  const [elapsedS, setElapsedS] = useState(0);
   const transcript = doc.transcript;
   const chunks = Array.isArray(transcript?.chunks) ? transcript.chunks : [];
 
@@ -382,6 +399,9 @@ function AudioTranscript({ doc, ctx, audioRef }) {
     }
     setError(null);
     setBusy({ status: 'starting' });
+    setElapsedS(0);
+    const startedAt = Date.now();
+    const ticker = setInterval(() => setElapsedS(Math.round((Date.now() - startedAt) / 1000)), 1000);
     try {
       const bytes = await readBytes(doc.file);
       if (!bytes) throw new Error('the audio bytes are not available on this device');
@@ -395,6 +415,7 @@ function AudioTranscript({ doc, ctx, audioRef }) {
     } catch (e) {
       setError(e?.message || String(e));
     } finally {
+      clearInterval(ticker);
       setBusy(null);
     }
   }
@@ -411,7 +432,7 @@ function AudioTranscript({ doc, ctx, audioRef }) {
       <div className="dv-transcript dv-transcript-empty">
         <button className="dv-btn ghost" onClick={runTranscribe} disabled={!!busy}>
           <i className="ph ph-waveform" aria-hidden="true"></i>
-          {busy ? transcribeStatusLabel(busy) : 'transcribe'}
+          {busy ? transcribeStatusLabel(busy, elapsedS) : 'transcribe'}
         </button>
         {!busy && !error && (
           <span className="dv-transcript-hint">runs in this tab · downloads a speech model on first use</span>
@@ -429,7 +450,7 @@ function AudioTranscript({ doc, ctx, audioRef }) {
           <i className="ph ph-arrow-clockwise" aria-hidden="true"></i>
         </button>
       </div>
-      {busy && <div className="dv-progress"><span className="dv-progress-label">{transcribeStatusLabel(busy)}</span></div>}
+      {busy && <div className="dv-progress"><span className="dv-progress-label">{transcribeStatusLabel(busy, elapsedS)}</span></div>}
       {error && <div className="dv-error">{error}</div>}
       <div className="dv-transcript-body">
         {chunks.length ? chunks.map((c, i) => (
