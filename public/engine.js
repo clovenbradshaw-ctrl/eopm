@@ -69,7 +69,53 @@ function initial() {
     schema: {},
     cursor: 0,
     _violations: [],
+    // anchor → writes that arrived before the INS creating it. See `park`.
+    _orphans: new Map(),
+    // event_id → already applied. "Same events in, same state out" only
+    // holds if applying an event twice is the same as applying it once, and
+    // the same event really does arrive twice: the live timeline and the
+    // durable block chain both carry it, and a backfill page can overlap
+    // what's already held. Without this, a doubled log doubles every CON
+    // edge and every EVA, and a repeated INS resets an entity — dropping
+    // every DEF applied to it since.
+    _applied: new Set(),
   };
+}
+
+// ── Out-of-order writes ──
+//
+// `origin_server_ts` is stamped by the homeserver on RECEIPT, not when the
+// client emitted. One user action can be several sends — creating a drive
+// document is `INS _doc` then `DEF file` then `DEF uploaded_at` — and a slow
+// or retried one comes back stamped ahead of a sibling that left later. The
+// fold then meets a DEF before the INS that creates its entity.
+//
+// Dropping that DEF loses real data: for a drive document it is the media
+// reference, so the file becomes unreadable while its bytes sit safely on the
+// media store. So the write is parked under its anchor and replayed the
+// moment the INS lands, in arrival order. The violation is still recorded —
+// the log really was malformed — but marked `_recovered`, so the linter can
+// tell "arrived out of order" from "never had an INS at all".
+
+function park(state, anchor, event, violation) {
+  if (!state._orphans) state._orphans = new Map();
+  if (!state._orphans.has(anchor)) state._orphans.set(anchor, []);
+  state._orphans.get(anchor).push({ event, violation });
+}
+
+function drainOrphans(state, anchor) {
+  const held = state._orphans?.get(anchor);
+  if (!held || !held.length) return;
+  state._orphans.delete(anchor);          // delete first — no re-parking loop
+  for (const { event, violation } of held) {
+    if (violation) violation._recovered = true;
+    // A parked event was already stamped into `_applied` on its first pass
+    // (where it found no entity and was held). Clear that so the replay —
+    // the pass that actually applies it — isn't swallowed as a duplicate.
+    const id = typeof event?.getId === 'function' ? event.getId() : event?.event_id;
+    if (id) state._applied?.delete(id);
+    dispatch(state, event);
+  }
 }
 
 function setPath(obj, path, value) {
@@ -86,7 +132,16 @@ function dispatch(state, event) {
   const op = parseEventType(event.type);
   if (!op) return state;
   const { content, sender, origin_server_ts: ts, event_id: eventId } = event;
-  state.cursor = ts;
+  // Exactly-once. Optimistic local events have no server id yet and are
+  // reconciled by transaction id elsewhere, so they're exempt.
+  if (eventId) {
+    if (!state._applied) state._applied = new Set();
+    if (state._applied.has(eventId)) return state;
+    state._applied.add(eventId);
+  }
+  // Monotonic: replaying a parked event revisits an older timestamp, and the
+  // cursor must not walk backwards when it does.
+  if (ts > state.cursor) state.cursor = ts;
 
   switch (op) {
     case OP.INS: {
@@ -111,6 +166,7 @@ function dispatch(state, event) {
             _bulkCount: rows.length,
             _bulkTarget: entity_type,
           };
+          drainOrphans(state, anchor);
         }
         for (let i = 0; i < rows.length; i++) {
           const r = rows[i];
@@ -128,27 +184,44 @@ function dispatch(state, event) {
             _writes: {},
             _importedFrom: anchor || null,
           };
+          drainOrphans(state, rAnchor);
         }
         break;
       }
       if (!anchor) break;
-      state.entities[anchor] = {
-        ...payload,
-        _anchor: anchor,
-        _type: entity_type,
-        _created: ts,
-        _sender: sender,
-        _eventId: eventId,
-        _hwm: OP.INS.order,
-        _writes: {},
-      };
+      const existing = state.entities[anchor];
+      if (existing) {
+        // Idempotent INS. The anchor is the hash of (type, payload, sender,
+        // ts), so a repeat carries the same payload by construction — and
+        // overwriting would discard every DEF, SEG and EVA applied since.
+        // Fill in anything genuinely absent and leave the rest alone.
+        for (const k of Object.keys(payload || {})) {
+          if (!(k in existing)) existing[k] = payload[k];
+        }
+      } else {
+        state.entities[anchor] = {
+          ...payload,
+          _anchor: anchor,
+          _type: entity_type,
+          _created: ts,
+          _sender: sender,
+          _eventId: eventId,
+          _hwm: OP.INS.order,
+          _writes: {},
+        };
+      }
+      // Anything that arrived for this anchor before its INS now applies.
+      drainOrphans(state, anchor);
       break;
     }
     case OP.SEG: {
       const { anchor, partition } = content;
       const entity = state.entities[anchor];
       if (!entity) {
-        state._violations.push({ type: 'missing_ins', op: 'SEG', anchor, _eventId: eventId, _ts: ts });
+        // SEG before its INS — hold it rather than losing the move.
+        const violation = { type: 'missing_ins', op: 'SEG', anchor, _eventId: eventId, _ts: ts };
+        state._violations.push(violation);
+        park(state, anchor, event, violation);
         break;
       }
       state.partitions[anchor] = partition;
@@ -210,7 +283,11 @@ function dispatch(state, event) {
       if (!anchor) break;
       const entity = state.entities[anchor];
       if (!entity) {
-        state._violations.push({ type: 'missing_ins', op: 'DEF', anchor, _eventId: eventId, _ts: ts });
+        // DEF before its INS — the one that loses data if dropped: a drive
+        // document's `file` DEF is its media reference.
+        const violation = { type: 'missing_ins', op: 'DEF', anchor, _eventId: eventId, _ts: ts };
+        state._violations.push(violation);
+        park(state, anchor, event, violation);
         break;
       }
       if (path) {
