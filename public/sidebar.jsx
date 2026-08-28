@@ -346,6 +346,7 @@ function Sidebar({
   onCreateView, onRenameView, onDuplicateView, onDeleteView,
   eventsTotal, ephemeralsCount, onRenameRoom, lastEventTs,
   onExportSchema, onArchiveSet, syncOutOfDate, syncByTable, myUserId,
+  open, onClose,
 }) {
   const { sets, meta, raw, archived: archivedSets } = useMemo(() => buildSets(state), [state]);
   const [showArchived, setShowArchived] = useState(false);
@@ -528,8 +529,9 @@ function Sidebar({
   const headerName = room?.title || 'untitled workspace';
 
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar ${open ? 'open' : ''}`}>
       <div className="sb-room-head">
+        <button className="sb-close" onClick={onClose} title="close menu" aria-label="close menu">✕</button>
         {editingName ? (
           <input
             autoFocus

@@ -239,6 +239,19 @@ function Kanban({ state, onEmit, entityType, myUserId }) {
                       <span>{t[titleField] || '(no ' + titleField + ')'}</span>
                       <window.SubscribeButton state={state} entityAnchor={t._anchor} onEmit={onEmit} myUserId={myUserId} size={12} />
                     </div>
+                    {/* Touch-reachable equivalent of the drag-to-move-column gesture —
+                        native HTML5 drag-and-drop above never fires on a touchscreen. */}
+                    <select
+                      className="card-move"
+                      value={p}
+                      onClick={e => e.stopPropagation()}
+                      onChange={e => moveTo(t._anchor, e.target.value)}
+                      title="move to another column"
+                    >
+                      {allPartitions.map(x => (
+                        <option key={x} value={x}>{x}</option>
+                      ))}
+                    </select>
                     {metaFields.length > 0 && (
                       <div className="card-fields">
                         {metaFields.map(f => {

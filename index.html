@@ -1513,6 +1513,69 @@ table.dbgrid tbody tr:hover .sel-caret,.sel-td.sel-open .sel-caret{opacity:1}
   .tv-tab .trows{display:none}
 }
 
+/* ── Mobile shell — off-canvas nav, topbar overflow, Drive stacking ────
+   New elements (hamburger / kebab / drive-rail toggle / backdrop) are
+   always in the DOM but hidden by default; the 760px block below is the
+   only place that turns them on, same pattern as .subtabs above. */
+.topbar-hamburger,.topbar-more-wrap,.dv-rail-toggle,.offcanvas-backdrop,.sb-close,.card-move{display:none}
+
+@media (max-width: 760px) {
+  /* App shell: sidebar becomes a slide-in drawer instead of a grid column */
+  .shell-body{grid-template-columns:1fr}
+  .sidebar{
+    position:fixed;top:0;bottom:0;left:0;width:min(84vw,320px);z-index:250;
+    transform:translateX(-100%);transition:transform .2s ease;
+    box-shadow:14px 0 30px -12px rgba(0,0,0,.35);
+  }
+  .sidebar.open{transform:translateX(0)}
+  .offcanvas-backdrop{display:block;position:fixed;inset:0;background:rgba(20,18,12,.42);z-index:249;backdrop-filter:blur(1px)}
+  .sb-close{display:inline-flex;align-items:center;justify-content:center;position:absolute;top:10px;right:8px;width:26px;height:26px;background:transparent;border:1px solid var(--border-strong);color:var(--text-dim);font-size:15px;line-height:1}
+  .sb-close:hover{color:#000;border-color:#000}
+  .sb-room-head{position:relative}
+
+  .topbar-hamburger{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border:1px solid var(--border-strong);background:#fff;font-size:16px;flex-shrink:0}
+  .topbar-hamburger:hover{border-color:#000}
+
+  /* Topbar overflow: secondary actions collapse into one kebab */
+  .topbar-collapsible{display:none}
+  .topbar-more-wrap{display:block;position:relative}
+  .topbar-more{padding:5px 10px;font-size:15px;line-height:1;color:var(--text-bright);background:#fff;border:1px solid var(--border-strong);cursor:pointer;min-height:28px}
+  .topbar-more:hover{border-color:#000}
+  .topbar-more-panel{position:absolute;top:calc(100% + 4px);right:0;background:#fff;border:1px solid #000;min-width:200px;z-index:35;box-shadow:4px 4px 0 var(--surface-3);display:flex;flex-direction:column}
+  .topbar-more-panel button{padding:9px 14px;background:transparent;border:none;border-bottom:1px solid var(--border);text-align:left;font-family:var(--mono);font-size:12.5px;color:var(--text);cursor:pointer;text-transform:lowercase;font-weight:500}
+  .topbar-more-panel button:last-child{border-bottom:none}
+  .topbar-more-panel button:hover:not(:disabled){background:var(--surface-2);color:var(--text-bright)}
+  .topbar-more-panel button:disabled{opacity:.45;cursor:not-allowed}
+
+  /* Row/file detail drawer — go fully full-screen instead of 92vw */
+  .record-detail-panel{width:100%;max-width:none}
+
+  /* Drive: 3-column → single column; folder rail and file info become overlays */
+  .dv-body,.dv-body:has(.dv-info){grid-template-columns:1fr}
+  .dv-rail-toggle{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border:1px solid var(--border);color:var(--text-dim);font-size:14px}
+  .dv-rail-toggle:hover{border-color:var(--border-bright);color:var(--text-bright)}
+  .dv-rail{
+    position:fixed;top:0;bottom:0;left:0;width:min(84vw,300px);z-index:250;
+    transform:translateX(-100%);transition:transform .2s ease;
+    box-shadow:14px 0 30px -12px rgba(0,0,0,.35);
+  }
+  .dv-rail.open{transform:translateX(0)}
+  .dv-info{position:fixed;inset:0;width:100%;z-index:301;border-left:none}
+
+  /* Popover edge-safety: don't let dropdowns run off a narrow screen */
+  .room-picker .panel,.tv-pop,.rd-view-menu,.gv-relprompt,.gv-legend,.gv-detail,.kt-menu{
+    max-width:calc(100vw - 24px);
+  }
+
+  /* Touch-gesture separation: horizontal board-scroll vs vertical column-scroll vs graph pan */
+  .kanban{touch-action:pan-x}
+  .kcol-body{touch-action:pan-y}
+  .graph-view{touch-action:pan-y}
+
+  /* Kanban: touch-reachable stand-in for drag-and-drop, which never fires on touch */
+  .card-move{display:block;width:100%;font-size:11px;padding:4px 6px;border:1px solid var(--border-strong);background:#fff;color:var(--text-bright)}
+}
+
 /* ── New-set (create table) form — airtable-style inline builder ──────── */
 .ct-form{margin:18px 24px 24px;background:#fff;border:1px solid var(--border-strong);font-family:var(--mono);display:flex;flex-direction:column;max-width:780px}
 .ct-head{padding:16px 20px 14px;border-bottom:1px solid var(--border)}

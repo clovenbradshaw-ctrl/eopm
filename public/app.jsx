@@ -803,6 +803,21 @@ function App() {
   // We also force-open it whenever the cursor is *not* live, so the user
   // can always see/return from a scrubbed state.
   const [scrubberOpen, setScrubberOpen] = useState(false);
+  // Mobile shell: sidebar drawer + topbar overflow menu. Both default closed;
+  // harmless on desktop since the CSS driving them only activates ≤760px.
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [topbarMoreOpen, setTopbarMoreOpen] = useState(false);
+  const topbarMoreRef = useRef(null);
+  // Close the drawer whenever navigation actually happens, so picking a view
+  // from the drawer doesn't leave it open over the content it just switched to.
+  useEffect(() => { setSidebarOpen(false); }, [selection, currentRoomId]);
+  // Same outside-click-close pattern as IdentityChip/RoomPicker's dropdowns.
+  useEffect(() => {
+    if (!topbarMoreOpen) return;
+    function close(e) { if (topbarMoreRef.current && !topbarMoreRef.current.contains(e.target)) setTopbarMoreOpen(false); }
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [topbarMoreOpen]);
   // Demo mode has no homeserver to push room renames to, so we keep the
   // user's chosen names in-memory and merge them into the rooms list.
   const [demoTitleOverrides, setDemoTitleOverrides] = useDemoTitleOverrides();
@@ -1665,6 +1680,12 @@ function App() {
   return (
     <div className="shell" onClickCapture={onActivityCapture}>
       <div className="topbar">
+        <button
+          className="topbar-hamburger"
+          onClick={() => setSidebarOpen(o => !o)}
+          title={sidebarOpen ? 'close menu' : 'open menu'}
+          aria-label={sidebarOpen ? 'close menu' : 'open menu'}
+        >☰</button>
         <window.IdentityChip
           session={session}
           onSignOut={handleSignOut}
@@ -1710,28 +1731,47 @@ function App() {
           return (
             <>
               <button
-                className="topbar-members"
+                className="topbar-members topbar-collapsible"
                 onClick={() => setMembersDialogRoomId(currentRoomId)}
                 title={stale ? 'reconnect to the homeserver to manage members' : 'manage members of this space'}
                 disabled={stale}
               >members</button>
               <button
-                className="topbar-members"
+                className="topbar-members topbar-collapsible"
                 onClick={() => setInviteDialogRoomId(currentRoomId)}
                 title={stale ? 'reconnect to the homeserver to invite people' : 'invite people via a link'}
                 disabled={stale}
               >invite</button>
               <button
-                className="topbar-members"
+                className="topbar-members topbar-collapsible"
                 onClick={() => setBroadcastDialogRoomId(currentRoomId)}
                 title={stale ? 'reconnect to the homeserver to send an update' : 'email a bulk update to chosen people'}
                 disabled={stale}
               >update</button>
+              <div className="topbar-more-wrap" ref={topbarMoreRef}>
+                <button
+                  className="topbar-more"
+                  onClick={() => setTopbarMoreOpen(o => !o)}
+                  title="more actions"
+                  aria-label="more actions"
+                >⋯</button>
+                {topbarMoreOpen && (
+                  <div className="topbar-more-panel" onClick={() => setTopbarMoreOpen(false)}>
+                    <button onClick={() => setMembersDialogRoomId(currentRoomId)} disabled={stale}>members</button>
+                    <button onClick={() => setInviteDialogRoomId(currentRoomId)} disabled={stale}>invite</button>
+                    <button onClick={() => setBroadcastDialogRoomId(currentRoomId)} disabled={stale}>update</button>
+                  </div>
+                )}
+              </div>
             </>
           );
         })()}
         <span className="spacer" />
-        {isLive && <SyncIndicator status={syncStatus} variant="pill" onResync={onResync} />}
+        {isLive && (
+          <span className="topbar-collapsible">
+            <SyncIndicator status={syncStatus} variant="pill" onResync={onResync} />
+          </span>
+        )}
         <button
           className={`topbar-timetravel ${scrubberOpen ? 'on' : ''} ${!live ? 'scrubbed' : ''}`}
           onClick={() => setScrubberOpen(o => !o)}
@@ -1759,6 +1799,7 @@ function App() {
       )}
 
       <div className="shell-body">
+        {sidebarOpen && <div className="offcanvas-backdrop" onClick={() => setSidebarOpen(false)} />}
         <window.Sidebar
           room={currentRoom}
           state={renderState}
@@ -1778,6 +1819,8 @@ function App() {
           myUserId={session?.mxid}
           syncOutOfDate={syncOutOfDate}
           syncByTable={syncByTable}
+          open={sidebarOpen}
+          onClose={() => setSidebarOpen(false)}
         />
 
         <div className="view-area">
