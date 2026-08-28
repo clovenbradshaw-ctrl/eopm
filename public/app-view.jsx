@@ -79,6 +79,24 @@ function Kanban({ state, onEmit, entityType, myUserId }) {
     return state.connections.filter(c => c.source === anchor || c.target === anchor);
   }
 
+  // A `blocks` cycle means none of the cards in it can ever be the first to
+  // start — flagged inline on every card involved, never blocking the board.
+  const blocksCycles = React.useMemo(() => (
+    window.Refutation ? window.Refutation.findCycles(state, { relation: 'blocks' }) : []
+  ), [state.connections]);
+  function cycleFor(anchor) {
+    return blocksCycles.find(f => f.path.includes(anchor)) || null;
+  }
+
+  // Rhythm is measured once per board render, not per card — computeRhythm
+  // scans the whole workspace, and every card's diagnosis shares the result.
+  const rhythm = React.useMemo(() => (
+    window.Unblock ? window.Unblock.computeRhythm(state) : null
+  ), [state]);
+  function diagnosisFor(anchor) {
+    return window.Unblock ? window.Unblock.diagnose(state.entities[anchor], state, rhythm) : null;
+  }
+
   // INS creates the thing, DEF puts the first parameter on it, SEG moves it
   function addEntity(partition) {
     const title = (newTitles[partition] || '').trim();
@@ -276,6 +294,11 @@ function Kanban({ state, onEmit, entityType, myUserId }) {
                         ))}
                       </div>
                     )}
+                    {cycleFor(t._anchor) && (
+                      <div className="card-cycle-warn" title={cycleFor(t._anchor).reason}>
+                        ⚠ cycle in `{cycleFor(t._anchor).relation}`: {cycleFor(t._anchor).path.join(' → ')}
+                      </div>
+                    )}
                     {t._evaluations && t._evaluations.length > 0 && (
                       <div className="evals">
                         {t._evaluations.slice(-3).map((e, i) => (
@@ -284,6 +307,9 @@ function Kanban({ state, onEmit, entityType, myUserId }) {
                           </span>
                         ))}
                       </div>
+                    )}
+                    {window.CubeCompass && (
+                      <window.CubeCompass entity={t} state={state} compact diagnosis={diagnosisFor(t._anchor)} />
                     )}
                   </div>
                 );
