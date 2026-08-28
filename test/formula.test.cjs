@@ -63,6 +63,18 @@ eq('WORKDAY rolls over Sat/Sun', val('DATESTR(WORKDAY("2026-01-16", 1))'), '2026
 eq('WORKDAY honors holidays', val('DATESTR(WORKDAY("2026-01-16", 1, "2026-01-19"))'), '2026-01-20'); // skip Mon holiday
 eq('WORKDAY_DIFF Mon→Fri = 4', val('WORKDAY_DIFF("2026-01-19", "2026-01-23")'), 4);
 eq('WORKDAY_DIFF ignores the weekend', val('WORKDAY_DIFF("2026-01-19", "2026-01-26")'), 5); // Mon→next Mon
+// Date-only values ("YYYY-MM-DD" — the shape date fields store) name a calendar
+// day and carry no timezone, so they must read back as THAT day in every zone.
+// JS parses them as UTC midnight, so local-timezone getters roll them back a
+// day west of UTC; run this file under TZ=America/Los_Angeles to feel it.
+eq('DATESTR keeps a date-only day', val('DATESTR("2026-03-09")'), '2026-03-09');
+eq('DATETIME_FORMAT keeps a date-only day', val('DATETIME_FORMAT("2026-03-09", "YYYY-MM-DD")'), '2026-03-09');
+eq('MONTH/YEAR of a date-only value', val('MONTH("2026-03-09") & "/" & YEAR("2026-03-09")'), '3/2026');
+eq('WEEKDAY of a date-only value (Mon)', val('WEEKDAY("2026-03-09")'), 1);
+eq('a date-only value has no clock', val('HOUR("2026-03-09")'), 0);
+eq('DATEADD steps whole days across a DST change', val('DATEADD("2026-03-06", 5, "days")'), '2026-03-11');
+eq('WORKDAY counts backwards too', val('WORKDAY("2026-01-19", -1)'), '2026-01-16');
+eq('WORKDAY_DIFF is signed', val('WORKDAY_DIFF("2026-01-23", "2026-01-19")'), -4);
 // SET_TIMEZONE / SET_LOCALE pass the instant through so DATETIME_FORMAT renders
 eq('SET_TIMEZONE passes through to format', val('DATETIME_FORMAT(SET_TIMEZONE({_created}, "America/New_York"), "YYYY-MM-DD")'), '2026-01-15');
 eq('SET_LOCALE passes through to format', val('DATETIME_FORMAT(SET_LOCALE({_created}, "en"), "YYYY-MM-DD")'), '2026-01-15');
