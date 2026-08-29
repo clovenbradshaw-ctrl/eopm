@@ -941,6 +941,41 @@ table.dbgrid td.cell.anchor.anchor-link:hover{color:var(--triad-structure);text-
 .sb-void{margin-bottom:6px}
 .void-view{display:flex;flex-direction:column;height:100%;min-height:0;background:var(--bg)}
 .void-body{flex:1;min-height:0;overflow:auto;padding:28px 24px 40px;display:flex;flex-direction:column;gap:22px;max-width:760px;margin:0 auto;width:100%}
+/* recurrence — what you keep coming back to. Reports the user's own
+   behaviour, so it is styled as an observation, never as an alert. */
+.void-recur{margin-top:18px}
+.void-recur-head{font-size:13px;font-weight:600;margin-bottom:10px}
+.void-recur-none{font-size:12px;color:var(--text-faint);line-height:1.55;padding:10px 0;border-top:1px solid var(--border)}
+.void-cluster{border:1px solid var(--border);padding:12px 14px;margin-bottom:10px;background:var(--surface)}
+.void-cluster-count{font-size:12.5px;font-weight:600;margin-bottom:7px}
+.void-cluster-terms{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px}
+.void-term{font-family:var(--mono);font-size:10.5px;padding:2px 6px;background:var(--surface-2);
+  border:1px solid var(--border);color:var(--text-dim)}
+.void-cluster-span{font-family:var(--mono);font-size:10.5px;color:var(--text-faint);margin-bottom:10px}
+.void-cluster-acts{display:flex;gap:8px}
+.void-filing{font-size:10.5px;color:var(--text-faint);font-family:var(--mono)}
+.void-held-open{padding:2px 7px;background:transparent;border:1px solid var(--border);color:var(--text-dim);
+  font-family:var(--mono);font-size:10.5px;cursor:pointer;white-space:nowrap}
+.void-held-open:hover{background:var(--surface-2)}
+/* shred preview — nothing is ever split without this being seen first */
+.void-shred-modal,.void-read-modal{max-width:560px}
+.void-shred-kind{font-size:14px;font-weight:600;margin-top:2px}
+.void-shred-hint{font-size:12px;color:var(--text-faint);line-height:1.55;margin-bottom:12px}
+.void-shred-list{max-height:320px;overflow-y:auto;border:1px solid var(--border)}
+.void-shred-row{display:flex;align-items:flex-start;gap:8px;padding:7px 9px;border-bottom:1px solid var(--border);
+  font-size:12px;line-height:1.5;cursor:pointer;opacity:.5}
+.void-shred-row:last-child{border-bottom:none}
+.void-shred-row.on{opacity:1}
+.void-shred-row:hover{background:var(--surface-2)}
+.void-shred-speaker{font-family:var(--mono);font-size:10px;text-transform:lowercase;color:var(--text-faint);
+  flex:0 0 auto;padding-top:2px}
+.void-shred-text{min-width:0}
+.void-shred-dropped{font-size:11px;color:var(--text-faint);margin-top:8px;line-height:1.5}
+.void-shred-foot{display:flex;justify-content:flex-end;gap:8px;padding:12px 16px 14px}
+.void-read-body{max-height:400px;overflow-y:auto}
+.void-read-row{display:flex;gap:12px;padding:9px 0;border-bottom:1px solid var(--border);font-size:12.5px;line-height:1.55}
+.void-read-row:last-child{border-bottom:none}
+.void-read-when{font-family:var(--mono);font-size:10.5px;color:var(--text-faint);flex:0 0 44px;padding-top:2px}
 .void-hero{text-align:center;padding:8px 0 4px}
 .void-hero-eyebrow{font-family:var(--mono);font-size:15px;font-weight:700;color:var(--text-bright);letter-spacing:.3px}
 .void-hero-sub{margin-top:8px;font-size:12.5px;color:var(--text-dim);line-height:1.6;max-width:480px;margin-left:auto;margin-right:auto}

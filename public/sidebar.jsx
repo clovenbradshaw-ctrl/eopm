@@ -562,7 +562,7 @@ function Sidebar({
       <button
         className={`sb-ask sb-void ${selection.kind === 'void' ? 'active' : ''}`}
         onClick={() => setSelection({ kind: 'void' })}
-        title="the Void — capture a stray thought with zero structural decisions, promote it to a real entity when it earns it"
+        title="the Void — dump anything here without deciding what it is; name it later, once you see what you keep coming back to"
       >
         <i className="ph ph-circle-dashed" aria-hidden="true"></i>
         <span className="sb-ask-label">the Void</span>

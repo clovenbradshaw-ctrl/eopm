@@ -1988,6 +1988,7 @@ function App() {
               scrubber={scrubberEl}
               setSelection={setSelection}
               myUserId={session?.mxid}
+              live={live}
             />
           )}
           {selection.kind === 'chat' && (

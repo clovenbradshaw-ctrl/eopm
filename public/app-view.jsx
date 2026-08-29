@@ -354,7 +354,7 @@ function Kanban({ state, onEmit, entityType, myUserId }) {
             </div>
           </div>
         ) : (
-          <button className="kcol-add-btn" onClick={() => setAddingCol(true)} title="add a new column · emits DEF _schema.partitions">
+          <button className="kcol-add-btn" onClick={() => setAddingCol(true)} title="add a new column">
             <i className="ph ph-plus" aria-hidden="true"></i>
             <span>add column</span>
           </button>

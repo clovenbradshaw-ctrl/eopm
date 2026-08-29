@@ -69,7 +69,7 @@ function makeFakeIndexedDB() {
   };
 }
 
-const { addHeld, listHeld, removeHeld } = await import('../src/void-store.js');
+const { addHeld, listHeld, removeHeld, updateHeld } = await import('../src/void-store.js');
 
 let passed = 0;
 async function test(name, fn) {
@@ -119,16 +119,28 @@ new Function('window', readFileSync(join(here, '..', 'public', 'engine.js'), 'ut
 const ME = win.MatrixEngine;
 ME.setNamespace('io.matrix-events');
 
-function emitInsFromHeld(events, entry, name, sender = '@you:demo') {
+// Mirrors public/void-view.jsx's handlePromote. Promotion emits the INS
+// that names the thing, then a DEF recording the notes it was made from:
+// those notes are deleted from the held store on promotion, and they are
+// the only record of why this looked worth naming, so they travel onto the
+// entity instead of being lost.
+function emitInsFromHeld(events, entries, name, sender = '@you:demo') {
+  const list = Array.isArray(entries) ? entries : [entries];
   const ts = Date.now();
   const payload = { Title: name };
   const anchor = ME.makeAnchor('observation', payload, sender, ts);
-  events.push({
-    type: ME.eventType(ME.OP.INS),
-    content: { anchor, entity_type: 'observation', payload },
-    origin_server_ts: ts,
-    sender,
+  const push = (op, content) => events.push({
+    type: ME.eventType(op), content, origin_server_ts: ts, sender,
     event_id: `$e_${events.length}`,
+  });
+  push(ME.OP.INS, { anchor, entity_type: 'observation', payload });
+  push(ME.OP.DEF, {
+    anchor,
+    path: 'came_from',
+    value: {
+      notes: list.map(e => ({ text: e.text, at: new Date(e.ts).toISOString() })),
+      first_seen: new Date(Math.min(...list.map(e => e.ts))).toISOString(),
+    },
   });
   return anchor;
 }
@@ -144,7 +156,7 @@ await test('the held item survives a reload before it is promoted', async () => 
   eq(afterReload[0].text, 'a stray thought');
 });
 
-await test('promotion emits exactly one INS carrying the typed name, and nothing else', async () => {
+await test('promotion names the thing and records the note it came from', async () => {
   const idb = makeFakeIndexedDB();
   const roomId = '!room:test';
   const entry = await addHeld(roomId, { text: 'board member also sits on the TN AG advisory council' }, idb);
@@ -153,16 +165,63 @@ await test('promotion emits exactly one INS carrying the typed name, and nothing
   const anchor = emitInsFromHeld(events, entry, 'TN AG advisory council overlap');
   await removeHeld(roomId, entry.id, idb);
 
-  eq(events.length, 1);
+  eq(events.length, 2);
   eq(ME.parseEventType(events[0].type), ME.OP.INS);
   eq(events[0].content.payload.Title, 'TN AG advisory council overlap');
+  eq(ME.parseEventType(events[1].type), ME.OP.DEF);
 
   const state = ME.fold(events);
   const entity = state.entities[anchor];
   assert.ok(entity, 'the promoted entity must exist in the fold');
   eq(entity.Title, 'TN AG advisory council overlap');
-  eq(entity._hwm, ME.OP.INS.order);
+  eq(entity.came_from.notes.length, 1);
+  eq(entity.came_from.notes[0].text, 'board member also sits on the TN AG advisory council');
   eq(state._violations, []);
+});
+
+await test('a thing named from a whole cluster remembers every note behind it', async () => {
+  const idb = makeFakeIndexedDB();
+  const roomId = '!room:test';
+  const a = await addHeld(roomId, { text: 'nobody knows what changed' }, idb);
+  const b = await addHeld(roomId, { text: 'we tried a changelog and it was ignored' }, idb);
+  const c = await addHeld(roomId, { text: 'every handoff someone asks what changed' }, idb);
+
+  const events = [];
+  const anchor = emitInsFromHeld(events, [a, b, c], 'Handoff Notes');
+  for (const e of [a, b, c]) await removeHeld(roomId, e.id, idb);
+
+  const state = ME.fold(events);
+  const entity = state.entities[anchor];
+  eq(entity.came_from.notes.length, 3);
+  assert.ok(entity.came_from.first_seen, 'the date it was first circled must survive');
+  eq(await listHeld(roomId, idb), [], 'every note in the cluster leaves the held store');
+  eq(state._violations, []);
+});
+
+await test('transcribing keeps the entry it belongs to, rather than making a new one', async () => {
+  const idb = makeFakeIndexedDB();
+  const roomId = '!room:test';
+  const first = await addHeld(roomId, { text: 'an earlier note' }, idb);
+  const memo = await addHeld(roomId, { text: '', attachment: { kind: 'audio', name: 'memo.webm' } }, idb);
+
+  const updated = await updateHeld(roomId, memo.id, { text: 'the words that were in the audio' }, idb);
+  eq(updated.id, memo.id, 'the entry keeps its identity');
+  eq(updated.ts, memo.ts, 'and its place in time — a transcript is not a new observation');
+  eq(updated.attachment.name, 'memo.webm', 'the audio it came from is still attached');
+
+  const list = await listHeld(roomId, idb);
+  eq(list.length, 2, 'updating must not add a row');
+  eq(list.find(e => e.id === memo.id).text, 'the words that were in the audio');
+  eq(list.find(e => e.id === first.id).text, 'an earlier note', 'other entries untouched');
+});
+
+await test('updating an entry that is already gone is a no-op, not a resurrection', async () => {
+  const idb = makeFakeIndexedDB();
+  const roomId = '!room:test';
+  const e = await addHeld(roomId, { text: 'here briefly' }, idb);
+  await removeHeld(roomId, e.id, idb);
+  eq(await updateHeld(roomId, e.id, { text: 'back from the dead' }, idb), null);
+  eq(await listHeld(roomId, idb), []);
 });
 
 await test('the held item is gone from IDB after promotion', async () => {

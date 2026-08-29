@@ -86,3 +86,25 @@ export async function removeHeld(roomId, id, idb) {
   await reqToPromise(store.put(cur.filter(e => e.id !== id), roomId));
   db.close?.();
 }
+
+/**
+ * Merge fields into one held entry, keeping its id, timestamp and place in
+ * the order. Transcription uses this: the entry is the same observation
+ * afterwards, now with words in it, and remove-then-add would give it a
+ * fresh id and jump it to the top of a list the user is reading.
+ * Returns the updated entry, or null if it is already gone.
+ */
+export async function updateHeld(roomId, id, patch, idb) {
+  const db = await openDb(idb);
+  const store = db.transaction(STORE, 'readwrite').objectStore(STORE);
+  const cur = (await reqToPromise(store.get(roomId))) || [];
+  let updated = null;
+  const next = cur.map(e => {
+    if (e.id !== id) return e;
+    updated = { ...e, ...patch, id: e.id, ts: e.ts, seq: e.seq };
+    return updated;
+  });
+  if (updated) await reqToPromise(store.put(next, roomId));
+  db.close?.();
+  return updated;
+}
