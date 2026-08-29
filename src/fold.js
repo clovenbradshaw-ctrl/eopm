@@ -67,6 +67,9 @@ export function initial() {
     // edge and every EVA, and a repeated INS resets an entity — dropping
     // every DEF applied to it since.
     _applied: new Set(),
+    // event_id of a CON → the retraction that arrived before it. See the
+    // CON case: a withdrawal can be sorted ahead of the edge it withdraws.
+    _pendingRetractions: new Map(),
   };
 }
 
@@ -122,6 +125,12 @@ export { cyrb53 };
 // arrival order. The violation is still recorded — the log really was
 // malformed — but tagged `_recovered` once the entity turns up, so the linter
 // can tell "arrived out of order" from "never had an INS at all".
+
+function stampRetraction(connection, ts, sender, eventId) {
+  connection._retracted = ts;
+  connection._retractedBy = sender;
+  connection._retractedEventId = eventId;
+}
 
 function park(state, anchor, event, violation) {
   if (!state._orphans) state._orphans = new Map();
@@ -234,7 +243,35 @@ function dispatch(state, event) {
     }
 
     case OP.CON: {
-      const { source_anchor, target_anchor, relation_type } = content;
+      const { source_anchor, target_anchor, relation_type, retracts } = content;
+
+      // ── Withdrawing an edge ──
+      //
+      // The algebra is closed at nine operators, so there is no NOT-CON to
+      // reach for, and the log is append-only, so nothing can be taken back
+      // out of it. A CON carrying `retracts` is the third option: a new
+      // event that names an earlier CON by event id and says the link it
+      // made no longer holds. The original stays in the log and in
+      // `state.connections` — that a link was once drawn is a fact about
+      // the work, and a case file that quietly loses "we thought this
+      // blocked that" is worth less than one that shows the correction. It
+      // is stamped, not deleted, and `connectionsFor` skips it by default.
+      //
+      // A retraction can outrun the edge it retracts: `chronological` sorts
+      // on timestamp and breaks operator ties on event_id, so two CONs in
+      // the same millisecond land in server-assigned order about half the
+      // time backwards. So an unmatched retraction is held and applied the
+      // moment its edge shows up, the same bargain `park` makes for a DEF
+      // that beats its INS.
+      if (retracts) {
+        const prior = state.connections.find(c => c._eventId === retracts);
+        if (prior) stampRetraction(prior, ts, sender, eventId);
+        else {
+          if (!state._pendingRetractions) state._pendingRetractions = new Map();
+          state._pendingRetractions.set(retracts, { ts, sender, eventId });
+        }
+        break;
+      }
 
       // CON bridges two entities — this is the serialization boundary.
       // Flag if either endpoint doesn't exist (Cartesian product).
@@ -249,14 +286,21 @@ function dispatch(state, event) {
         });
       }
 
-      state.connections.push({
+      const connection = {
         source: source_anchor,
         target: target_anchor,
         type: relation_type,
         _ts: ts,
         _sender: sender,
         _eventId: eventId,
-      });
+      };
+      // A retraction that arrived first has been waiting for exactly this.
+      const early = eventId && state._pendingRetractions?.get(eventId);
+      if (early) {
+        stampRetraction(connection, early.ts, early.sender, early.eventId);
+        state._pendingRetractions.delete(eventId);
+      }
+      state.connections.push(connection);
 
       // Advance _hwm on both endpoints if they exist
       const src = state.entities[source_anchor];
@@ -456,8 +500,23 @@ export function entitiesInPartition(state, partition) {
   return Object.values(state.entities).filter(e => state.partitions[e._anchor] === partition);
 }
 
-export function connectionsFor(state, anchor) {
-  return state.connections.filter(c => c.source === anchor || c.target === anchor);
+/**
+ * Every edge touching `anchor`, in either direction.
+ *
+ * Withdrawn edges (see the CON case's `retracts`) are left out by default:
+ * a caller asking what this thing is connected to wants what holds now, not
+ * what was once asserted. Pass `{ includeRetracted: true }` for the full
+ * record — the timeline and any audit surface want that one.
+ */
+export function connectionsFor(state, anchor, { includeRetracted = false } = {}) {
+  return state.connections.filter(c =>
+    (c.source === anchor || c.target === anchor) &&
+    (includeRetracted || !c._retracted));
+}
+
+/** Every edge that still holds. */
+export function activeConnections(state) {
+  return (state.connections || []).filter(c => !c._retracted);
 }
 
 export function currentFrame(state) {
@@ -495,7 +554,11 @@ export function stateHash(state) {
     const e = state.entities[k];
     input += k + ':' + (e._hwm || 0) + ':' + (e._updated || e._created || 0) + ';';
   }
-  input += 'c:' + state.connections.length + ';f:' + state.frames.length;
+  // Retracting an edge changes neither the entity set nor the length of
+  // the connection list, so counting withdrawals is what makes an
+  // unlinked dependency actually repaint.
+  const retracted = state.connections.reduce((n, c) => n + (c._retracted ? 1 : 0), 0);
+  input += 'c:' + state.connections.length + '/' + retracted + ';f:' + state.frames.length;
   // Include schema and partitions so DEF-on-schema and SEG trigger re-render
   const pKeys = Object.keys(state.partitions).sort();
   for (const pk of pKeys) input += 'p:' + pk + '=' + state.partitions[pk] + ';';

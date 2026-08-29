@@ -945,6 +945,58 @@ table.dbgrid td.cell.anchor.anchor-link:hover{color:var(--triad-structure);text-
 .cc-diag-settle-label{font-size:9.5px;text-transform:uppercase;letter-spacing:1px;color:var(--text-dim);margin-bottom:2px}
 .cc-diag-settle-row{color:var(--text-bright)}
 
+/* ── Waiting — what the work is stuck behind ─────────────────────────── */
+.sb-waiting{margin-bottom:6px}
+.sb-ask-count.warn{color:var(--signal);border-color:var(--signal)}
+.waiting-view .tv-body.single{overflow:auto}
+.wv-wrap{max-width:860px;margin:0 auto;width:100%;padding:28px 24px 40px;display:flex;flex-direction:column;gap:26px}
+.wv-h{font-size:13px;font-weight:600;margin-bottom:4px}
+.wv-sub{font-size:11.5px;color:var(--text-faint);line-height:1.55;margin-bottom:10px}
+.wv-empty{font-size:12px;color:var(--text-faint);line-height:1.6;padding:14px 0;border-top:1px solid var(--border)}
+
+/* freed — the payoff for recording dependencies at all */
+.wv-freed{border-left:2px solid var(--green);padding-left:14px}
+.wv-freed-row{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)}
+.wv-freed-row:last-child{border-bottom:none}
+.wv-freed-why{font-size:11px;color:var(--text-faint)}
+
+/* the list */
+.wv-head{display:flex;gap:14px;font-size:9.5px;text-transform:uppercase;letter-spacing:1px;
+  color:var(--text-faint);padding-bottom:6px;border-bottom:1px solid var(--border)}
+.wv-row{display:flex;gap:14px;align-items:flex-start;padding:11px 0;border-bottom:1px solid var(--border)}
+.wv-row:last-child{border-bottom:none}
+.wv-age{flex:0 0 62px;font-family:var(--mono);font-size:12px;color:var(--text-dim);
+  display:flex;align-items:baseline;gap:4px;padding-top:1px}
+.wv-row.stalled .wv-age{color:var(--signal);font-weight:600}
+.wv-warn{color:var(--signal)}
+.wv-main{flex:1;min-width:0}
+.wv-actions{flex:0 0 auto;display:flex;gap:6px;align-items:flex-start}
+.wv-title{font-size:13px;font-weight:600;text-align:left;color:var(--text-bright);
+  text-decoration:underline;text-decoration-color:var(--border);text-underline-offset:3px}
+.wv-title:hover{text-decoration-color:var(--text-bright)}
+.wv-title:disabled{cursor:default;text-decoration:none;color:var(--text-faint)}
+.wv-holds{font-size:11.5px;color:var(--text-dim);margin-top:3px;display:flex;flex-wrap:wrap;
+  align-items:baseline;gap:6px}
+.wv-dead{color:var(--text-faint)}
+.wv-dependents{display:flex;flex-wrap:wrap;gap:5px}
+.wv-dep{font-family:var(--mono);font-size:10.5px;padding:1px 6px;background:var(--surface-2);
+  border:1px solid var(--border);color:var(--text-dim);max-width:220px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.wv-dep:hover{background:var(--surface-3);color:var(--text-bright)}
+.wv-more{font-size:10.5px;color:var(--text-faint)}
+/* the verdict line carries its own odds — never a bare alert */
+.wv-verdict{font-size:11px;line-height:1.55;margin-top:5px;color:var(--signal)}
+.wv-verdict.soft{color:var(--text-faint)}
+.wv-act{font-family:var(--mono);font-size:10.5px;padding:3px 8px;background:var(--surface);
+  border:1px solid var(--border);color:var(--text-dim);white-space:nowrap}
+.wv-act:hover:not(:disabled){background:var(--surface-2);color:var(--text-bright);border-color:var(--border-bright)}
+.wv-act:disabled{opacity:.4;cursor:default}
+.wv-act.ghost{background:transparent;color:var(--text-faint)}
+.wv-act.danger{border-color:var(--signal);color:var(--signal)}
+.wv-foot{border-top:1px solid var(--border);padding-top:12px;font-size:11px;color:var(--text-faint);
+  line-height:1.6;display:flex;flex-direction:column;gap:5px}
+.wv-bar{max-width:64ch}
+
 /* ── the Void — Existence · Ground · Clearing ────────────────────────── */
 .sb-void{margin-bottom:6px}
 .void-view{display:flex;flex-direction:column;height:100%;min-height:0;background:var(--bg)}
@@ -2257,6 +2309,7 @@ table.csv-preview tr:last-child td{border-bottom:none}
   import * as PlainPosition from '/src/plain-position.js';
   import * as Recurrence from '/src/recurrence.js';
   import * as Shred from '/src/shred.js';
+  import * as Waiting from '/src/waiting.js';
   window.Cube = CubeKernel;
   window.CubePosition = CubePosition;
   window.VoidStore = VoidStore;
@@ -2267,6 +2320,9 @@ table.csv-preview tr:last-child td{border-bottom:none}
   window.PlainPosition = PlainPosition;
   window.Recurrence = Recurrence;
   window.Shred = Shred;
+  // Dependency edges read both ways: what each thing is stuck behind, and
+  // what would move if it arrived. See src/waiting.js.
+  window.Waiting = Waiting;
 </script>
 
 <script src="vendor/react.js"></script>
@@ -2296,6 +2352,7 @@ table.csv-preview tr:last-child td{border-bottom:none}
 <script type="text/babel" data-presets="react" src="cube-compass.jsx"></script>
 <script type="text/babel" data-presets="react" src="card-status.jsx"></script>
 <script type="text/babel" data-presets="react" src="void-view.jsx"></script>
+<script type="text/babel" data-presets="react" src="waiting-view.jsx"></script>
 <script type="text/babel" data-presets="react" src="sidebar.jsx"></script>
 <script type="text/babel" data-presets="react" src="entity-timeline.jsx"></script>
 <script type="text/babel" data-presets="react" src="iteration-view.jsx"></script>

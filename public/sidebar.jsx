@@ -32,6 +32,7 @@ const SLICE_KINDS = {
   notebook:  { icon: '▤', label: 'notebook',  blurb: 'chronological narrative entries'          },
   synthesis: { icon: '⊛', label: 'synthesis', blurb: 'SYN-rollup view'                          },
   schema:    { icon: '⊢', label: 'schema',    blurb: 'declared shape of the set'                },
+  waiting:   { icon: '◷', label: 'waiting',   blurb: 'what the work is stuck behind, oldest first' },
   log:       { icon: '⊟', label: 'log',       blurb: 'append-only event timeline'               },
 };
 
@@ -356,6 +357,16 @@ function Sidebar({
     () => (window.Drive ? window.Drive.allDocs(state).length : 0),
     [state]
   );
+  // Open waits, and how many of them have run longer than any wait this
+  // workspace has finished. Both come straight off the fold — no events
+  // needed for the count, since whether a wait is open is a question about
+  // stages, not about when they were entered.
+  const waiting = useMemo(
+    () => (window.Waiting ? window.Waiting.waitingRows(state) : { rows: [] }),
+    [state]
+  );
+  const waitingCount = waiting.rows.length;
+  const waitingFlagged = waiting.rows.filter(r => r.stalled).length;
   const allSets = [...sets, ...meta];
   const rawSets = raw;
 
@@ -589,6 +600,18 @@ function Sidebar({
       >
         <i className="ph ph-circle-dashed" aria-hidden="true"></i>
         <span className="sb-ask-label">the Void</span>
+      </button>
+
+      <button
+        className={`sb-ask sb-waiting ${selection.kind === 'waiting' ? 'active' : ''}`}
+        onClick={() => setSelection({ kind: 'waiting' })}
+        title="everything the work is stuck behind — how long each has been open, and what would move if it arrived"
+      >
+        <i className="ph ph-hourglass-medium" aria-hidden="true"></i>
+        <span className="sb-ask-label">Waiting</span>
+        {waitingCount > 0 && (
+          <span className={`sb-ask-count ${waitingFlagged > 0 ? 'warn' : ''}`}>{waitingCount}</span>
+        )}
       </button>
 
       <button

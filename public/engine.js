@@ -69,6 +69,9 @@ function initial() {
     schema: {},
     cursor: 0,
     _violations: [],
+    // event_id of a CON → a retraction that arrived ahead of it. See the
+    // CON case; src/fold.js carries the same map for the same reason.
+    _pendingRetractions: new Map(),
     // anchor → writes that arrived before the INS creating it. See `park`.
     _orphans: new Map(),
     // event_id → already applied. "Same events in, same state out" only
@@ -231,7 +234,20 @@ function dispatch(state, event) {
       break;
     }
     case OP.CON: {
-      const { source_anchor, target_anchor, relation_type } = content;
+      const { source_anchor, target_anchor, relation_type, retracts } = content;
+      // A CON naming an earlier one withdraws it rather than adding a
+      // second edge — same bargain as src/fold.js's CON case, which is the
+      // authority. Kept in step here so "not actually blocked" works in
+      // demo mode too; without it the button would look like it worked.
+      if (retracts) {
+        const prior = state.connections.find(c => c._eventId === retracts);
+        if (prior) { prior._retracted = ts; prior._retractedBy = sender; prior._retractedEventId = eventId; }
+        else {
+          if (!state._pendingRetractions) state._pendingRetractions = new Map();
+          state._pendingRetractions.set(retracts, { ts, sender, eventId });
+        }
+        break;
+      }
       const srcMissing = !state.entities[source_anchor];
       const tgtMissing = !state.entities[target_anchor];
       if (srcMissing || tgtMissing) {
@@ -242,10 +258,18 @@ function dispatch(state, event) {
           _eventId: eventId, _ts: ts,
         });
       }
-      state.connections.push({
+      const connection = {
         source: source_anchor, target: target_anchor, type: relation_type,
         _eventId: eventId, _ts: ts, _sender: sender,
-      });
+      };
+      const early = eventId && state._pendingRetractions?.get(eventId);
+      if (early) {
+        connection._retracted = early.ts;
+        connection._retractedBy = early.sender;
+        connection._retractedEventId = early.eventId;
+        state._pendingRetractions.delete(eventId);
+      }
+      state.connections.push(connection);
       const src = state.entities[source_anchor];
       const tgt = state.entities[target_anchor];
       if (src && OP.CON.order > src._hwm) src._hwm = OP.CON.order;

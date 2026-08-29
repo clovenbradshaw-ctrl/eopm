@@ -154,7 +154,8 @@ function saveLastView(user, roomId, selection) {
 function validSavedSelection(sel) {
   if (!sel || typeof sel !== 'object') return false;
   if (sel.kind === 'log' || sel.kind === 'sync' || sel.kind === 'chat' ||
-      sel.kind === 'drive' || sel.kind === 'watching' || sel.kind === 'void') return true;
+      sel.kind === 'drive' || sel.kind === 'watching' || sel.kind === 'void' ||
+      sel.kind === 'waiting') return true;
   if (sel.kind !== 'slice') return false;
   return ['table', 'schema', 'kanban', 'notebook', 'graph', 'timeline', 'iteration'].includes(sel.sliceKind);
 }
@@ -1989,6 +1990,16 @@ function App() {
               setSelection={setSelection}
               myUserId={session?.mxid}
               live={live}
+            />
+          )}
+          {selection.kind === 'waiting' && (
+            <window.WaitingView
+              room={currentRoom}
+              state={renderState}
+              onEmit={onEmit}
+              scrubber={scrubberEl}
+              setSelection={setSelection}
+              allEventsInRoom={allEvents}
             />
           )}
           {selection.kind === 'chat' && (
