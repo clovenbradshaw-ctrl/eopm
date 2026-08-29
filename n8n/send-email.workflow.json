@@ -1,5 +1,5 @@
 {
-  "name": "Send Email (Gmail)",
+  "name": "send-email (Matrix-authenticated)",
   "nodes": [
     {
       "parameters": {
@@ -8,12 +8,36 @@
         "responseMode": "responseNode",
         "options": {}
       },
-      "id": "webhook-trigger",
+      "id": "5ad6675d-c6cc-422d-ae35-96b20a1063ce",
       "name": "Webhook",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [-260, 300],
+      "position": [-1120, -112],
       "webhookId": "send-email"
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.MATRIX_HOMESERVER }}/_matrix/client/v3/account/whoami",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ $json.headers.authorization }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "a1c2e3f4-1111-4a2b-9c3d-000000000001",
+      "name": "Who is calling?",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-880, -112],
+      "onError": "continueErrorOutput",
+      "notes": "The homeserver is read from $env, never from the request. If the caller could name it, they could point this at a server they control and have it vouch for any user_id they liked."
     },
     {
       "parameters": {
@@ -21,157 +45,163 @@
           "options": {
             "caseSensitive": true,
             "leftValue": "",
-            "typeValidation": "strict"
+            "typeValidation": "loose"
           },
           "conditions": [
             {
-              "id": "auth-check",
-              "leftValue": "={{ $json.headers['x-webhook-secret'] }}",
-              "rightValue": "={{ $env.EMAIL_WEBHOOK_SECRET }}",
-              "operator": {
-                "type": "string",
-                "operation": "equals"
-              }
+              "id": "has-user",
+              "leftValue": "={{ $json.user_id }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "notEmpty" }
             },
             {
               "id": "to-present",
-              "leftValue": "={{ $json.body.to }}",
+              "leftValue": "={{ $('Webhook').item.json.body.to }}",
               "rightValue": "",
-              "operator": {
-                "type": "string",
-                "operation": "notEmpty"
-              }
+              "operator": { "type": "string", "operation": "notEmpty" }
             }
           ],
           "combinator": "and"
         },
         "options": {}
       },
-      "id": "auth-if",
-      "name": "Authorized?",
+      "id": "a1c2e3f4-2222-4a2b-9c3d-000000000002",
+      "name": "Known user, and a recipient?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [-40, 300]
+      "position": [-640, -112]
     },
     {
       "parameters": {
-        "resource": "message",
-        "operation": "send",
-        "sendTo": "={{ $json.body.to }}",
-        "subject": "={{ $json.body.subject }}",
-        "emailType": "={{ $json.body.html ? 'html' : 'text' }}",
-        "message": "={{ $json.body.html || $json.body.text }}",
+        "url": "={{ $env.MATRIX_HOMESERVER }}/_matrix/client/v3/profile/{{ encodeURIComponent($json.user_id) }}/displayname",
+        "options": { "timeout": 10000 }
+      },
+      "id": "a1c2e3f4-3333-4a2b-9c3d-000000000003",
+      "name": "Their display name",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-400, -208],
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true,
+      "notes": "Read from the homeserver, not from the request body, so the name on the email is one the sender actually owns. A user with no display name set is not an error — the Matrix ID is used instead."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the outgoing mail from what the HOMESERVER said about the\n// caller, not from what the caller claimed about themselves.\n//\n// The From address is still the Gmail account this workflow is\n// connected to — Gmail will not let a workflow forge someone else's\n// address, and pretending otherwise would be the kind of thing that\n// gets a domain marked as a spoofer. What the recipient sees instead\n// is the sender's own display name, with their verified Matrix ID in\n// the body so there is always something checkable behind the name.\n\nconst body = $('Webhook').first().json.body || {};\nconst userId = $('Who is calling?').first().json.user_id;\n\nconst profile = $('Their display name').first().json || {};\nconst prettyName = (profile.displayname || '').trim() || userId;\n\nconst esc = (s) => String(s ?? '').replace(/[&<>\"']/g, (c) => (\n  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' }[c]\n));\n\n// The signature is appended by us, from verified data, so a sender\n// cannot dress their message up as coming from somebody else.\nconst signature =\n  '<hr style=\"border:none;border-top:1px solid #ddd;margin:18px 0 10px\">' +\n  '<p style=\"color:#888;font-size:12px;margin:0\">' +\n  'Sent by <b>' + esc(prettyName) + '</b> (' + esc(userId) + ')' +\n  ($env.WORKSPACE_NAME ? ' via ' + esc($env.WORKSPACE_NAME) : '') +\n  '</p>';\n\nconst html = (body.html || (body.text ? '<p>' + esc(body.text) + '</p>' : '')) + signature;\n\nreturn [{\n  json: {\n    to: body.to,\n    cc: body.cc || '',\n    bcc: body.bcc || '',\n    replyTo: body.replyTo || '',\n    subject: body.subject || '(no subject)',\n    html,\n    senderName: prettyName,\n    userId,\n  },\n}];"
+      },
+      "id": "a1c2e3f4-4444-4a2b-9c3d-000000000004",
+      "name": "Compose as that user",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-176, -208]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.html }}",
         "options": {
-          "ccList": "={{ $json.body.cc }}",
-          "bccList": "={{ $json.body.bcc }}",
-          "replyTo": "={{ $json.body.replyTo }}"
+          "senderName": "={{ $json.senderName }}",
+          "replyTo": "={{ $json.replyTo }}",
+          "ccList": "={{ $json.cc }}",
+          "bccList": "={{ $json.bcc }}"
         }
       },
-      "id": "gmail-send",
+      "id": "30b53f2d-192e-4d32-b9ce-2d86cf156896",
       "name": "Gmail",
       "type": "n8n-nodes-base.gmail",
       "typeVersion": 2.1,
-      "position": [180, 200],
-      "onError": "continueErrorOutput",
+      "position": [64, -208],
+      "webhookId": "13c8189b-de81-4f25-9e3c-91a596e18ba5",
       "credentials": {
         "gmailOAuth2": {
           "id": "REPLACE_WITH_CREDENTIAL_ID",
-          "name": "Gmail account"
+          "name": "archon intelechia"
         }
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ { \"ok\": true, \"id\": $json.id, \"threadId\": $json.threadId } }}",
+        "responseBody": "={{ { \"ok\": true, \"id\": $json.id, \"threadId\": $json.threadId, \"sentAs\": $('Compose as that user').item.json.userId } }}",
         "options": {}
       },
-      "id": "respond-ok",
+      "id": "b7877967-f61b-461e-b7d1-9999538e4643",
       "name": "Respond 200",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.2,
-      "position": [420, 140]
+      "position": [304, -288]
     },
     {
       "parameters": {
         "respondWith": "json",
         "responseBody": "={{ { \"ok\": false, \"error\": $json.error?.message || \"send failed\" } }}",
-        "options": {
-          "responseCode": 502
-        }
+        "options": { "responseCode": 502 }
       },
-      "id": "respond-send-error",
+      "id": "0d70d57e-c175-4dcd-8dff-4da050bdddaa",
       "name": "Respond 502",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.2,
-      "position": [420, 300]
+      "position": [304, -128]
     },
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ { \"ok\": false, \"error\": \"unauthorized or missing 'to'\" } }}",
-        "options": {
-          "responseCode": 401
-        }
+        "responseBody": "={{ { \"ok\": false, \"error\": \"Sign-in not recognised — the homeserver did not accept that access token.\" } }}",
+        "options": { "responseCode": 401 }
       },
-      "id": "respond-unauthorized",
+      "id": "2236ad34-df2a-4074-a474-b5dda5f63d60",
       "name": "Respond 401",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.2,
-      "position": [180, 460]
+      "position": [-640, 96]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"ok\": false, \"error\": \"Missing a recipient.\" } }}",
+        "options": { "responseCode": 400 }
+      },
+      "id": "2236ad34-df2a-4074-a474-b5dda5f63d61",
+      "name": "Respond 400",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.2,
+      "position": [-400, 16]
     }
   ],
   "connections": {
     "Webhook": {
+      "main": [[{ "node": "Who is calling?", "type": "main", "index": 0 }]]
+    },
+    "Who is calling?": {
       "main": [
-        [
-          {
-            "node": "Authorized?",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [{ "node": "Known user, and a recipient?", "type": "main", "index": 0 }],
+        [{ "node": "Respond 401", "type": "main", "index": 0 }]
       ]
     },
-    "Authorized?": {
+    "Known user, and a recipient?": {
       "main": [
-        [
-          {
-            "node": "Gmail",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Respond 401",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [{ "node": "Their display name", "type": "main", "index": 0 }],
+        [{ "node": "Respond 400", "type": "main", "index": 0 }]
       ]
+    },
+    "Their display name": {
+      "main": [[{ "node": "Compose as that user", "type": "main", "index": 0 }]]
+    },
+    "Compose as that user": {
+      "main": [[{ "node": "Gmail", "type": "main", "index": 0 }]]
     },
     "Gmail": {
       "main": [
-        [
-          {
-            "node": "Respond 200",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Respond 502",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [{ "node": "Respond 200", "type": "main", "index": 0 }],
+        [{ "node": "Respond 502", "type": "main", "index": 0 }]
       ]
     }
   },
-  "active": false,
-  "settings": {
-    "executionOrder": "v1"
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "5c737be3fd9beebae6ccb42a087a71b95589b90d613100d5ba10c73188a40d22"
   }
 }

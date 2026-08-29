@@ -118,42 +118,21 @@ function LinkOut({ url, note }) {
 // InvitePanel — the member-side widget
 // ─────────────────────────────────────────────────────────────────────────
 
-// A shared n8n webhook (Gmail underneath) can email the link directly
-// instead of making the inviter copy/paste it. The secret that unlocks
-// it is vault-encrypted per device — nobody types it more than once per
-// device, and it never touches the room's operator log.
+// An n8n webhook (Gmail underneath) can email the link directly instead of
+// making the inviter copy/paste it. It authenticates as the signed-in
+// Matrix user, so there is nothing to set up on a new device — the only
+// state that can stop it is being signed out.
 function EmailSendRow({ email, setEmail }) {
-  const ML = window.MatrixLive;
-  const [cfg, setCfg] = useState(() => ML.getEmailConfig());
-  const [secretDraft, setSecretDraft] = useState('');
-  const [savingSecret, setSavingSecret] = useState(false);
-  const [secretErr, setSecretErr] = useState('');
-
-  const needsSecret = email.trim() && !cfg.canSend;
-
-  async function saveSecret() {
-    if (!secretDraft.trim() || savingSecret) return;
-    setSavingSecret(true); setSecretErr('');
-    try { setCfg(await ML.setEmailConfig({ secret: secretDraft.trim() })); setSecretDraft(''); }
-    catch (e) { setSecretErr(e?.message || "Couldn't save that."); }
-    setSavingSecret(false);
-  }
+  const cfg = window.MatrixLive.getEmailConfig();
+  const cannotSend = email.trim() && !cfg.canSend;
 
   return (
     <div style={{ marginBottom: 8 }}>
       <label style={{ fontSize: 10.5, color: 'var(--text-faint)', display: 'block', marginBottom: 4 }}>email it to them too (optional)</label>
       <input value={email} onChange={e => setEmail(e.target.value)} placeholder="sam@example.com" style={fieldStyle} />
-      {needsSecret && (
-        <div style={{ marginTop: 6 }}>
-          <div style={{ fontSize: 10.5, color: 'var(--text-faint)', marginBottom: 4, lineHeight: 1.4 }}>
-            One-time setup for this device: paste the email webhook secret to enable sending.
-          </div>
-          <div style={{ display: 'flex', gap: 6 }}>
-            <input type="password" value={secretDraft} onChange={e => { setSecretDraft(e.target.value); setSecretErr(''); }}
-              onKeyDown={e => e.key === 'Enter' && saveSecret()} placeholder="webhook secret" style={{ ...fieldStyle, flex: 1 }} />
-            <button style={btnStyle(false)} disabled={savingSecret} onClick={saveSecret}>{savingSecret ? <Spinner /> : 'save'}</button>
-          </div>
-          {secretErr && <div style={{ fontSize: 10.5, color: 'var(--red)', marginTop: 4 }}>{secretErr}</div>}
+      {cannotSend && (
+        <div style={{ fontSize: 10.5, color: 'var(--red)', marginTop: 6, lineHeight: 1.4 }}>
+          You're signed out, so this can't be emailed — the link below still works.
         </div>
       )}
     </div>

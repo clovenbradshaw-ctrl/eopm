@@ -36,6 +36,10 @@ function BroadcastPanel({ roomId, roomTitle, session, state, onEmit, onClose }) 
   const [results, setResults] = useState(null); // { sent: [mxid], failed: [{mxid, error}] }
   const [emailDrafts, setEmailDrafts] = useState({});
   const [savingFor, setSavingFor] = useState(null);
+  // Sending is authenticated as the signed-in Matrix user, so there is
+  // nothing to set up — this only ever trips if the session has gone.
+  const [notSignedIn, setNotSignedIn] = useState(false);
+  const sendingAs = ML.getEmailConfig().sendingAs;
 
   useEffect(() => {
     let alive = true;
@@ -50,6 +54,12 @@ function BroadcastPanel({ roomId, roomTitle, session, state, onEmit, onClose }) 
     .filter(m => m.userId !== session?.mxid)
     .map(m => ({ ...m, email: window.PeopleDirectory?.emailFor(state, m.userId) || null })),
   [members, state, session]);
+
+  // Results are about people, so they say the person's name. An mxid is
+  // what the machine calls them, not what the sender does.
+  function nameOf(mxid) {
+    return rows.find(r => r.userId === mxid)?.displayName || mxid;
+  }
 
   function toggle(mxid) {
     setSelected(s => { const n = new Set(s); if (n.has(mxid)) n.delete(mxid); else n.add(mxid); return n; });
@@ -70,6 +80,15 @@ function BroadcastPanel({ roomId, roomTitle, session, state, onEmit, onClose }) 
 
   async function send() {
     if (busy || selected.size === 0 || !subject.trim()) return;
+
+    // Whether this device can send at all is one fact about the device, not
+    // a fact about each recipient. Attempting the loop anyway produced a
+    // failure line per person that named THEM and gave a reason that had
+    // nothing to do with them ("couldn't reach: @sam:… (Email sending is
+    // not configured yet.)"). Check once, up front.
+    if (!ML.getEmailConfig().canSend) { setNotSignedIn(true); return; }
+    setNotSignedIn(false);
+
     setBusy(true); setResults(null);
     const sent = [], failed = [];
     const html = body.split('\n').map(l => `<p>${l || '&nbsp;'}</p>`).join('') +
@@ -114,11 +133,20 @@ function BroadcastPanel({ roomId, roomTitle, session, state, onEmit, onClose }) 
                   <i className="ph ph-check" aria-hidden="true"></i> sent to {results.sent.length} {results.sent.length === 1 ? 'person' : 'people'}
                 </div>
               )}
-              {results.failed.length > 0 && (
-                <div style={{ fontSize: 11.5, color: 'var(--red)', lineHeight: 1.5 }}>
-                  couldn't reach: {results.failed.map(f => `${f.mxid} (${f.error})`).join(', ')}
+              {/* Group by reason rather than listing one line per person:
+                  when a send fails, it usually fails the same way for
+                  everybody, and repeating the reason next to each name
+                  reads as though each of them were the problem. */}
+              {results.failed.length > 0 && Object.entries(
+                results.failed.reduce((by, f) => {
+                  (by[f.error] = by[f.error] || []).push(nameOf(f.mxid));
+                  return by;
+                }, {})
+              ).map(([reason, who]) => (
+                <div key={reason} style={{ fontSize: 11.5, color: 'var(--red)', lineHeight: 1.5, marginBottom: 4 }}>
+                  {reason} — {who.join(', ')}
                 </div>
-              )}
+              ))}
               <button style={{ ...btnStyle(false), marginTop: 12 }} onClick={() => { setResults(null); setSelected(new Set()); setSubject(''); setBody(''); }}>send another</button>
             </div>
           ) : (
@@ -158,10 +186,22 @@ function BroadcastPanel({ roomId, roomTitle, session, state, onEmit, onClose }) 
               <textarea value={body} onChange={e => setBody(e.target.value)} rows={6} placeholder="What's changed, what's next…"
                 style={{ ...fieldStyle, resize: 'vertical', marginBottom: 10, fontFamily: 'inherit' }} />
 
+              {notSignedIn && (
+                <div style={{ fontSize: 11.5, color: 'var(--red)', marginBottom: 10, lineHeight: 1.5 }}>
+                  You're signed out, so there's no one to send this as. Sign in and try again.
+                </div>
+              )}
+
               <button style={btnStyle(true)} disabled={busy || selected.size === 0 || !subject.trim()} onClick={send}>
                 {busy ? <Spinner /> : <i className="ph ph-paper-plane-tilt" aria-hidden="true"></i>}
                 {busy ? 'sending…' : `send to ${selected.size || ''} ${selected.size === 1 ? 'person' : 'people'}`}
               </button>
+              {sendingAs && (
+                <div style={{ fontSize: 10.5, color: 'var(--text-faint)', marginTop: 8, lineHeight: 1.45 }}>
+                  Goes out under your name, with <code>{sendingAs}</code> in the message so people
+                  can see who it's really from. Replies come back to you.
+                </div>
+              )}
             </>
           )}
         </div>

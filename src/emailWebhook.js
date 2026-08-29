@@ -1,28 +1,41 @@
 /**
- * emailWebhook.js — send email through a shared n8n webhook.
+ * emailWebhook.js — send email through an n8n webhook, as yourself.
  *
  * The webhook (n8n.intelechia.com/webhook/send-email, backed by Gmail)
- * requires an `x-webhook-secret` header the sender proves knowledge of;
- * everything else in the body is plain routing (to/subject/html). The
- * secret is the only thing that has to stay private, so it's stored
- * vault-encrypted per device/user — same pattern as drivebackup.js's
- * config — and never written to the operator log or shared over Matrix.
+ * authenticates the caller by their **Matrix access token**: it forwards
+ * the token to a pinned homeserver's `/account/whoami`, and only sends if
+ * the homeserver recognises it. The workflow then reads the sender's
+ * display name from their Matrix profile and puts their verified Matrix ID
+ * in the body — see n8n/send-email.workflow.json.
  *
- * Mirrors drivebackup.js's configure/getConfig/loadConfig/saveConfig
- * shape on purpose, so main.js wires this in exactly the same way it
- * already wires in Drive backup.
+ * This replaced a shared `x-webhook-secret`. That secret was one string
+ * for everyone, so the workflow could not tell who was sending, every
+ * device had to be handed it before it could send anything, and anyone
+ * holding it could send as the project forever. A Matrix token is already
+ * in hand the moment someone signs in, is scoped to one person, and stops
+ * working when they sign out — so there is nothing left to set up, and
+ * every message can honestly say who sent it.
+ *
+ * No credential is stored by this module. The token is read from the live
+ * session at send time through an injected provider, so it is never copied
+ * anywhere it would then have to be cleaned up.
  */
 
-const SECRET_NAME = 'email_webhook_v1';
 const DEFAULT_WEBHOOK_URL = 'https://n8n.intelechia.com/webhook/send-email';
 
-let config = { webhookUrl: DEFAULT_WEBHOOK_URL, secret: '' };
+let config = { webhookUrl: DEFAULT_WEBHOOK_URL };
+
+// Supplied by main.js: () => ({ token, userId }) for the signed-in session,
+// or null when nobody is signed in.
+let authProvider = () => null;
+
+/** Wire up where the Matrix access token comes from. */
+export function setAuthProvider(fn) {
+  authProvider = typeof fn === 'function' ? fn : () => null;
+}
 
 function normalize(cfg = {}) {
-  return {
-    webhookUrl: (cfg.webhookUrl || DEFAULT_WEBHOOK_URL).trim(),
-    secret: (cfg.secret || '').trim(),
-  };
+  return { webhookUrl: (cfg.webhookUrl || DEFAULT_WEBHOOK_URL).trim() };
 }
 
 export function configure(cfg) {
@@ -30,36 +43,24 @@ export function configure(cfg) {
   return getConfig();
 }
 
-/** Current config (a copy), with a derived `canSend`. */
+/**
+ * Current config (a copy), with a derived `canSend`.
+ *
+ * Being signed in IS the configuration now, so `canSend` asks about the
+ * session rather than about a stored secret. Nothing to paste, nothing to
+ * forget on a new device.
+ */
 export function getConfig() {
-  return { ...config, canSend: !!(config.webhookUrl && config.secret) };
-}
-
-/** Load this user's config from the vault secret store into memory. */
-export async function loadConfig(userId, loadSecret) {
-  try {
-    const raw = await loadSecret(userId, SECRET_NAME);
-    configure(raw ? JSON.parse(raw) : {});
-  } catch {
-    configure({});
-  }
-  return getConfig();
-}
-
-/** Persist this user's config (vault-encrypted) and apply it in memory. */
-export async function saveConfig(userId, cfg, { storeSecret, removeSecret }) {
-  const next = normalize(cfg);
-  configure(next);
-  if (next.secret) {
-    await storeSecret(userId, SECRET_NAME, JSON.stringify(next));
-  } else if (removeSecret) {
-    removeSecret(userId, SECRET_NAME);
-  }
-  return getConfig();
+  const auth = authProvider();
+  return {
+    ...config,
+    canSend: !!(config.webhookUrl && auth?.token),
+    sendingAs: auth?.userId || null,
+  };
 }
 
 export function clearConfig() {
-  config = { webhookUrl: DEFAULT_WEBHOOK_URL, secret: '' };
+  config = { webhookUrl: DEFAULT_WEBHOOK_URL };
 }
 
 /**
@@ -68,14 +69,25 @@ export function clearConfig() {
  * response) so callers can show `e.message` directly.
  */
 export async function sendEmail({ to, subject, html, text, cc, bcc, replyTo }) {
-  if (!config.secret) { const e = new Error('Email sending is not configured yet.'); e.code = 'not_configured'; throw e; }
+  const auth = authProvider();
+  if (!auth?.token) {
+    const e = new Error('Sign in before sending email.');
+    e.code = 'not_signed_in';
+    throw e;
+  }
   if (!to) throw new Error('Missing recipient.');
 
   let res;
   try {
     res = await fetch(config.webhookUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-webhook-secret': config.secret },
+      headers: {
+        'Content-Type': 'application/json',
+        // The workflow hands this straight to the homeserver's whoami and
+        // sends as whoever comes back. Nothing here claims an identity —
+        // the token is the claim, and the homeserver settles it.
+        Authorization: `Bearer ${auth.token}`,
+      },
       body: JSON.stringify({ to, subject, html, text, cc, bcc, replyTo }),
     });
   } catch (e) {
@@ -85,7 +97,7 @@ export async function sendEmail({ to, subject, html, text, cc, bcc, replyTo }) {
   let data = {};
   try { data = await res.json(); } catch (e) { /* non-JSON error body */ }
 
-  if (res.status === 401) throw new Error('Email webhook rejected the secret — check it and try again.');
+  if (res.status === 401) throw new Error('The email service did not recognise your sign-in. Signing out and back in should fix it.');
   if (!res.ok || data.ok === false) throw new Error(data.error || `Email send failed (${res.status})`);
   return data;
 }
