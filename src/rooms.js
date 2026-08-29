@@ -12,7 +12,7 @@
 import { getClient } from './client.js';
 import { getNamespace } from './operators.js';
 import { ClientEvent, MatrixEventEvent, RoomEvent, RoomStateEvent, EventStatus } from 'matrix-js-sdk';
-import { inviteCapabilityFromPowerLevels, canGrantLevel } from './permissions.js';
+import { inviteCapabilityFromPowerLevels, canGrantLevel, VIEWER_PL, keyExchangeTypesAbove } from './permissions.js';
 
 const META_TYPE = () => `${getNamespace()}.meta`;
 
@@ -33,22 +33,28 @@ export async function createRoom(name, roomType, meta = {}) {
     name,
     visibility: 'private',
     preset: 'private_chat',
-    // Every member (PL 0) may publish the envelope-encryption state events:
-    // their identity public key, their wrapped workspace key, their
-    // media-store block-chain head, and their account self-report (which
-    // device claimed it, whether it has a password). All four are
-    // sender-scoped (state_key = own mxid, enforced by Matrix auth
-    // rules), so opening them up grants nothing beyond each member's own
-    // slots. Without this override state_default (50) would silently
-    // exclude invitees from the durable block chain — and, for
-    // member_status, would leave a link-invited guest unable to tell the
-    // room they still have no password.
+    // EVERY member — including a read-only viewer at PL -1 — may publish
+    // the envelope-encryption state events: their identity public key,
+    // their wrapped workspace key, their media-store block-chain head, and
+    // their account self-report. All four are sender-scoped (state_key =
+    // own mxid, enforced by Matrix auth rules), so opening them up grants
+    // nothing beyond each member's own slots.
+    //
+    // The level is VIEWER_PL, not 0, and that is load-bearing rather than
+    // generous. grantWorkspaceKey() can only wrap the workspace key for
+    // members who have published a `member_key`; a viewer held at PL 0 for
+    // these types cannot publish one, so no member can ever grant to them
+    // and they can never decrypt anything in the room. The invite link's
+    // copy of the key papers over it in the browser that opened the link
+    // and nowhere else — one cache wipe and a viewer is locked out for
+    // good, with no path back. Writing operators is still governed by
+    // events_default, so a viewer remains read-only where it matters.
     power_level_content_override: {
       events: {
-        [`${ns}.member_key`]: 0,
-        [`${ns}.wkey`]: 0,
-        [`${ns}.blocks`]: 0,
-        [`${ns}.member_status`]: 0,
+        [`${ns}.member_key`]: VIEWER_PL,
+        [`${ns}.wkey`]: VIEWER_PL,
+        [`${ns}.blocks`]: VIEWER_PL,
+        [`${ns}.member_status`]: VIEWER_PL,
       },
     },
     initial_state: [
@@ -549,6 +555,42 @@ export async function setMemberPowerLevel(roomId, userId, level) {
   const plEvent = room.currentState.getStateEvents('m.room.power_levels', '');
   if (!plEvent) throw new Error('No power_levels state event');
   await client.setPowerLevel(roomId, userId, level, plEvent);
+}
+
+/**
+ * Make sure a room lets its lowest-powered members publish the state they
+ * need to be handed the workspace key, lowering the four sender-scoped
+ * types to VIEWER_PL if they sit above it.
+ *
+ * Rooms created before this was understood pin those types at 0 while a
+ * viewer sits at -1, which strands the viewer completely: they cannot
+ * publish a `member_key`, grantWorkspaceKey() therefore never wraps the
+ * key for them, and the room stays undecryptable no matter how long they
+ * wait. The invite link's copy of the key hides this in the browser that
+ * opened the link and nowhere else.
+ *
+ * Returns the list of types it repaired (empty when nothing was needed).
+ * Best-effort by design — the caller may not have permission to change
+ * power levels, and an invite is still worth sending if this fails.
+ */
+export async function ensureKeyExchangeOpen(roomId, level = VIEWER_PL) {
+  const client = getClient();
+  if (!client) throw new Error('Not connected');
+  const room = client.getRoom(roomId);
+  if (!room) throw new Error('Room not found: ' + roomId);
+  const plEvent = room.currentState.getStateEvents('m.room.power_levels', '');
+  if (!plEvent) return [];
+
+  const content = plEvent.getContent() || {};
+  const stale = keyExchangeTypesAbove(content, getNamespace(), level);
+  if (!stale.length) return [];
+
+  const next = {
+    ...content,
+    events: { ...(content.events || {}), ...Object.fromEntries(stale.map(t => [t, level])) },
+  };
+  await client.sendStateEvent(roomId, 'm.room.power_levels', next, '');
+  return stale;
 }
 
 /**

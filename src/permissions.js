@@ -19,6 +19,51 @@
  */
 
 /**
+ * The power level a read-only member sits at. Below events_default (0), so
+ * the homeserver itself rejects their operator writes rather than the UI
+ * merely hiding the buttons.
+ *
+ * Anything a viewer must still be able to publish — every sender-scoped
+ * state type in the key-exchange handshake — has to be opened down to this
+ * level too, or the viewer cannot take part in it at all. See
+ * KEY_EXCHANGE_STATE_TYPES and rooms.js's createRoom override.
+ */
+export const VIEWER_PL = -1;
+
+/**
+ * The state types every member publishes about themselves. All are
+ * sender-scoped (state_key = own mxid, which Matrix auth rules let only
+ * that user write), so granting them at VIEWER_PL hands a viewer nothing
+ * except their own slots.
+ *
+ * These specifically gate whether a member can be given the workspace key:
+ * grantWorkspaceKey() wraps only for members who published a `member_key`.
+ */
+export const KEY_EXCHANGE_STATE_TYPES = ['member_key', 'wkey', 'blocks', 'member_status'];
+
+/**
+ * Which of the key-exchange state types a room currently holds above
+ * `level` — i.e. the ones a member at `level` would be unable to publish.
+ * Empty means the room is already fine.
+ *
+ * Rooms created before this was understood pin all four at 0, which
+ * silently strands every viewer: unable to publish a member_key, they can
+ * never be granted the workspace key, so the room decrypts to nothing for
+ * them forever.
+ */
+export function keyExchangeTypesAbove(plContent, namespace, level = VIEWER_PL) {
+  const events = (plContent || {}).events || {};
+  const stateDefault = Number.isFinite((plContent || {}).state_default)
+    ? plContent.state_default : 50;
+  return KEY_EXCHANGE_STATE_TYPES
+    .map(t => `${namespace}.${t}`)
+    .filter(type => {
+      const required = Number.isFinite(events[type]) ? events[type] : stateDefault;
+      return required > level;
+    });
+}
+
+/**
  * Derive what a user can do re: inviting + granting access in a room, from
  * the room's actual m.room.power_levels content (not assumed defaults).
  *

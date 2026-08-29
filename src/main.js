@@ -34,7 +34,8 @@ import { createRoom as mxCreateRoom, discoverRooms, getTimeline, onTimeline,
          onDecrypted, onLocalEchoUpdated, EventStatus,
          setName as mxSetRoomName, getDisplayName as mxGetDisplayName,
          setDisplayName as mxSetDisplayName,
-         getInviteCapability, canGrantLevel } from './rooms.js';
+         getInviteCapability, canGrantLevel, ensureKeyExchangeOpen } from './rooms.js';
+import { VIEWER_PL } from './permissions.js';
 import { EventStore, requestPersistentStorage, getOpfsBreakdown, getCacheStorageUsage } from './store.js';
 import { vault, getLastUser, loadSecret, storeSecret, removeSecret } from './vault.js';
 import { OutboxFlusher, listAll as outboxListAll, pendingCount,
@@ -1547,6 +1548,18 @@ async function kickUser(roomId, userId, reason) {
 }
 
 async function setUserPowerLevel(roomId, userId, level) {
+  // Demoting someone below events_default only makes them read-only if they
+  // can still take part in key exchange — otherwise they are not a viewer,
+  // they are locked out. Open the sender-scoped state types first, so the
+  // demotion never lands on a room that cannot grant them the key.
+  if (level < 0) {
+    try {
+      const repaired = await ensureKeyExchangeOpen(roomId, level);
+      if (repaired.length) console.info('[perm] opened key exchange for read-only members:', repaired.join(', '));
+    } catch (e) {
+      console.warn('[perm] could not open key exchange for read-only members:', e?.message || e);
+    }
+  }
   await setMemberPowerLevel(roomId, userId, level);
   notify('members');
 }
@@ -2051,6 +2064,9 @@ window.MatrixLive = {
   // homeserver won't let the inviter deliver.
   getInviteCapability,
   canGrantLevel,
+  // The one definition of "read-only", so the invite UI can't drift from
+  // the level rooms.js actually opens key exchange down to.
+  VIEWER_PL,
   getMyDisplayName,
   // File import / media
   importFile: importFileToRoom,

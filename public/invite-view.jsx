@@ -49,7 +49,10 @@
 (function () {
 const { useState, useEffect, useMemo } = React;
 
-const ROLE_PL = { viewer: -1, editor: 0 };
+// Read-only comes from src/permissions.js so this can't drift from the level
+// rooms.js opens key exchange down to. If those two disagree, a "viewer" is
+// silently a locked-out member instead of a read-only one.
+const ROLE_PL = { viewer: window.MatrixLive?.VIEWER_PL ?? -1, editor: 0 };
 const ROLE_DEFS = [
   ['editor', 'Editor', 'Full access — can create and change anything in this project.'],
   ['viewer', 'Viewer', "Read-only — the homeserver itself rejects their writes, not just the UI."],
