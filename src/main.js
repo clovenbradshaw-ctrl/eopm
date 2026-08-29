@@ -1571,6 +1571,27 @@ async function readMediaBlob(ref, onProgress) {
 }
 
 async function inviteUser(roomId, userId) {
+  // Before anyone is invited, make sure the room will let them take part in
+  // key exchange at all.
+  //
+  // Rooms created before createRoom() set these overrides leave all four
+  // sender-scoped types at state_default, which is 50. That is far above
+  // even an editor (0), so an invitee of ANY role cannot publish their
+  // `member_key` — and grantWorkspaceKey() only wraps the workspace key for
+  // members who have. The invitation succeeds, the person joins, and the
+  // workspace decrypts to nothing for them, forever, with nothing in the UI
+  // to explain it.
+  //
+  // This originally only ran when demoting someone to viewer, which missed
+  // the common case entirely: an ordinary editor invite never touched it.
+  try {
+    const repaired = await ensureKeyExchangeOpen(roomId);
+    if (repaired.length) console.info('[perm] opened key exchange in this room so invitees can be given the key:', repaired.join(', '));
+  } catch (e) {
+    // Not fatal: the inviter may not have the power to change this. They
+    // still get an invite; the recipient may just wait for a grant.
+    console.warn('[perm] could not open key exchange before inviting:', e?.message || e);
+  }
   await invite(roomId, userId);
   notify('members');
 }

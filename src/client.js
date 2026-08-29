@@ -1209,16 +1209,29 @@ export async function restoreSession(userId) {
     progress(`Crypto init failed (continuing offline): ${e.message}`);
   }
 
-  // Either wipe just orphaned this session's device. Carrying on would
-  // rebuild an Olm account under a device whose one-time keys the server
-  // already holds, and every upload from here on would 400 forever. Bail
-  // out instead: the caller's `needsLogin` path signs in again and the
-  // homeserver hands back a fresh device.
-  if (ownerWiped || initWiped) {
-    orphanDevice(sid, ownerWiped ? 'another account signed in here' : 'the store had to be rebuilt');
+  // A store wiped because it belonged to somebody ELSE is unambiguous:
+  // this device's keys for this user are definitely gone, so the session
+  // cannot be carried on with. Sign in again and the homeserver hands back
+  // a fresh device.
+  //
+  // `initWiped` deliberately does NOT bail. That wipe is the long-standing
+  // recovery for a crypto store that would not open — a lock held by
+  // another tab, a slow cold start that timed out, a partial write — and it
+  // usually succeeds on the retry. Treating it as fatal logged people out
+  // every time it fired, which for anyone with two tabs open is every
+  // single load. Losing a session is much worse than the problem it was
+  // guarding against, especially since that problem announces itself
+  // clearly when it is real: an orphaned device fails on its one-time key
+  // upload, and onOtkConflict() clears the session then, on evidence rather
+  // than on suspicion.
+  if (ownerWiped) {
+    orphanDevice(sid, 'another account signed in here');
     try { client.stopClient(); } catch (e) { /* never started */ }
     client = null;
     return null;
+  }
+  if (initWiped) {
+    console.warn('[matrix] crypto store had to be rebuilt; keeping the session. If this device was orphaned, the key upload will say so and it will sign out then.');
   }
 
   let sessionExpired = false;
