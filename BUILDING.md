@@ -454,6 +454,40 @@ non-existent anchor raises `cartesian_product`. `REC` with no prior `EVA`
 anywhere raises `blind_restructuring`. The fold records; your linter
 diagnoses.
 
+### Withdrawing a `CON`
+
+There is no tenth operator and the log is append-only, so a link that turns
+out to be wrong cannot be deleted. It is *withdrawn*: emit another `CON`
+whose content carries `retracts` set to the event id of the original.
+
+```js
+await ME.emit(roomId, OP.CON, {
+  source_anchor: c.source, target_anchor: c.target,
+  relation_type: c.type, retracts: c._eventId,
+});
+// or, from src/operators.js:  await unCon(roomId, connection)
+```
+
+The fold does not push a second edge for it. It stamps the original with
+`_retracted` / `_retractedBy` / `_retractedEventId` and leaves it in
+`state.connections`, because that a link was once asserted is a fact about
+the work and a case file that silently loses its own corrections is worth
+less than one that shows them. Query through `connectionsFor(state, anchor)`
+or `activeConnections(state)` — both skip withdrawn edges; pass
+`{ includeRetracted: true }` for the full record, which is what a timeline or
+an audit surface wants.
+
+Two details another implementation has to match. A retraction can be sorted
+*ahead* of the edge it withdraws (two `CON`s in one millisecond tie-break on
+the server-assigned event id), so an unmatched retraction is held in
+`_pendingRetractions` and applied when its edge arrives. And `stateHash`
+counts withdrawals separately — a retraction changes neither the entity set
+nor the length of the connection list, so without that an unlinked
+dependency would never repaint.
+
+`public/engine.js` carries the same case for demo mode; `src/fold.js` is the
+authority.
+
 ---
 
 ## 6. Federation, in practice
@@ -537,6 +571,9 @@ intended to interoperate, deliberately no for an isolated one:
       depends on the operator algebra being shared vocabulary.
 - [ ] If you redefine what a field means, emit `REC` with `before_frame` and
       `after_frame` so other clients can reproject.
+- [ ] You honour `retracts` on `CON` — a withdrawn link must stop counting
+      as a link in your projection, and you must never delete the original
+      edge to achieve that. See "Withdrawing a `CON`" above.
 
 When two apps respect this list, they can share rooms and each will see the
 other's entities, edits, links, and judgments as first-class data — without

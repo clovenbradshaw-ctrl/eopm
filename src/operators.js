@@ -164,6 +164,24 @@ export async function con(roomId, sourceAnchor, targetAnchor, relationType) {
   });
 }
 
+/**
+ * CON — withdraw an edge drawn earlier, naming it by its event id.
+ *
+ * Still a CON: there is no tenth operator, and the log is append-only, so
+ * taking a link back is itself a link event. The fold stamps the original
+ * rather than dropping it (see fold.js's CON case), which is why the
+ * endpoints are carried along — the withdrawal is readable on its own in
+ * the timeline without a join back to the edge it undoes.
+ */
+export async function unCon(roomId, connection) {
+  return emit(roomId, OP.CON, {
+    source_anchor: connection.source,
+    target_anchor: connection.target,
+    relation_type: connection.type,
+    retracts: connection._eventId,
+  });
+}
+
 /** SYN — Merge multiple entities into a synthesized whole. */
 export async function syn(roomId, inputAnchors, output) {
   return emit(roomId, OP.SYN, { input_anchors: inputAnchors, output });
