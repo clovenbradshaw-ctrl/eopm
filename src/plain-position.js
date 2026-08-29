@@ -157,6 +157,47 @@ export function describeFinding(finding, state = {}) {
   return null;
 }
 
+// ── provenance ─────────────────────────────────────────────────────────
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function shortDate(value) {
+  const t = typeof value === 'number' ? value : Date.parse(value);
+  if (!Number.isFinite(t)) return null;
+  const d = new Date(t);
+  return `${MONTHS[d.getMonth()]} ${d.getDate()}`;
+}
+
+/**
+ * describeProvenance(value) → { text, title } for a `came_from` record, or
+ * null if this isn't one.
+ *
+ * The notes a thing was made from are the most human content in the whole
+ * log, and dumping them as `{"notes":[{"text":"…","at":"2026-08-29T02:54…`
+ * is the worst possible way to show them. What matters at a glance is how
+ * many there were and how far back they go; the words themselves belong in
+ * the tooltip and the expanded row, not squeezed into a grid cell.
+ */
+export function describeProvenance(value) {
+  if (!value || typeof value !== 'object' || !Array.isArray(value.notes)) return null;
+  const n = value.notes.length;
+  const when = shortDate(value.first_seen) ||
+    shortDate(value.notes[0]?.at);
+
+  const text = n === 0 ? 'no notes'
+    : n === 1 ? (when ? `1 note, ${when}` : '1 note')
+    : (when ? `${n} notes, back to ${when}` : `${n} notes`);
+
+  const title = value.notes
+    .map(note => {
+      const d = shortDate(note.at);
+      return `${d ? d + ' — ' : ''}${note.text || ''}`;
+    })
+    .join('\n\n');
+
+  return { text, title };
+}
+
 // ── workspace-level ────────────────────────────────────────────────────
 
 /**

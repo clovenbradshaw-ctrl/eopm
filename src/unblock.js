@@ -70,30 +70,57 @@ function collectMoveTimestamps(state, events) {
 /**
  * computeRhythm(state, opts) → how often this workspace normally sees a
  * move, measured as the median gap between consecutive moves. Below
- * `minMoves` (default 50) it reports `measured: false` rather than a
- * number built on too little to mean anything.
+ * `minGaps` it reports `measured: false` rather than a number built on too
+ * little to mean anything. `max` — the longest gap this workspace has
+ * actually had — is what a silence gets judged against; see MIN_GAPS.
  */
-export function computeRhythm(state, { events, minMoves = 50 } = {}) {
+export function computeRhythm(state, { events, minGaps = MIN_GAPS } = {}) {
   const ts = collectMoveTimestamps(state, events);
-  if (ts.length < minMoves) {
-    return { measured: false, moves: ts.length, needed: minMoves, median: null };
-  }
   const deltas = [];
   for (let i = 1; i < ts.length; i++) {
     const d = ts[i] - ts[i - 1];
     if (d > 0) deltas.push(d); // same-instant bursts are one action, not a "return"
   }
   deltas.sort((a, b) => a - b);
-  const median = deltas.length ? deltas[Math.floor(deltas.length / 2)] : null;
-  return { measured: true, moves: ts.length, median };
+
+  if (deltas.length < minGaps) {
+    return { measured: false, moves: ts.length, gaps: deltas.length, needed: minGaps, median: null, max: null };
+  }
+  return {
+    measured: true,
+    moves: ts.length,
+    gaps: deltas.length,
+    median: deltas[Math.floor(deltas.length / 2)],
+    max: deltas[deltas.length - 1],
+  };
 }
 
 // ── diagnose ────────────────────────────────────────────────────────────
 
-// How far past the workspace's usual pace counts as "worth a look", not
-// just "a bit slow". 3x is deliberately conservative — the mockup this
-// was modeled on flags an entity at roughly 5x its workspace's median.
-const STALL_MULTIPLIER = 3;
+/**
+ * A silence counts as unusual when it is longer than EVERY gap this
+ * workspace has actually had — no multiplier, and no assumption about the
+ * shape of the distribution.
+ *
+ * This is a rank test, and its strength is exact. If nothing has changed
+ * about how this workspace works, the current silence is just another draw
+ * from the same pot as the `n` gaps already observed, so the chance it
+ * happens to be the longest of the `n + 1` is exactly `1/(n + 1)`. That
+ * number is reported alongside the verdict rather than hidden behind a
+ * threshold, and it tightens on its own as evidence accumulates: with four
+ * gaps behind it a flag means little, with forty it means a good deal.
+ *
+ * The version this replaced needed 50 moves before it would say anything
+ * and then compared against 3x the median. Both numbers were invented, and
+ * between them they meant a workspace one person had been using for a
+ * fortnight could never be told anything at all.
+ */
+
+// Two gaps is the smallest number for which "longer than all of them" is a
+// comparison rather than a restatement of the only value there is. This is
+// a floor on what the test can mean, not a judgement about when a
+// workspace becomes interesting.
+const MIN_GAPS = 2;
 
 function isDateLike(value) {
   if (typeof value !== 'string') return false;
@@ -219,13 +246,12 @@ function shapeOf(entity, state) {
 export function diagnose(entity, state, rhythm) {
   if (!entity) return { stalled: false, mode: null, domain: null, why: null, wouldSettle: [] };
 
+  const idle = { stalled: false, mode: null, domain: null, why: null, wouldSettle: [], oddsIfNothingChanged: null, longerThan: 0 };
+
   if (!rhythm || !rhythm.measured) {
     return {
-      stalled: false,
-      mode: null,
-      domain: null,
-      why: `not enough data yet (${rhythm?.moves ?? 0} moves, need ~${rhythm?.needed ?? 50}) — not calling anything stalled until this workspace's actual pace is measurable`,
-      wouldSettle: [],
+      ...idle,
+      why: `this workspace has only ${rhythm?.gaps ?? 0} gap${(rhythm?.gaps ?? 0) === 1 ? '' : 's'} between actions so far — too few to tell a pause from a habit`,
     };
   }
 
@@ -235,9 +261,14 @@ export function diagnose(entity, state, rhythm) {
     : Number.isFinite(entity._created) ? entity._created
     : Date.now();
   const age = Date.now() - lastTouch;
-  const stalled = age > rhythm.median * STALL_MULTIPLIER;
-  if (!stalled) return { stalled: false, mode: null, domain: null, why: null, wouldSettle: [] };
+  if (age <= rhythm.max) return idle;
 
-  const shape = shapeOf(entity, state);
-  return { stalled: true, ...shape };
+  return {
+    stalled: true,
+    // Exact under exchangeability: the chance this silence is the longest
+    // of the n + 1 draws when nothing has actually changed.
+    oddsIfNothingChanged: 1 / (rhythm.gaps + 1),
+    longerThan: rhythm.gaps,
+    ...shapeOf(entity, state),
+  };
 }

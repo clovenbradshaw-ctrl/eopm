@@ -358,6 +358,25 @@ function Sidebar({
   );
   const allSets = [...sets, ...meta];
   const rawSets = raw;
+
+  // The held count lives in the Void's local store rather than the fold, so
+  // it has to be read rather than derived. Re-read whenever the log moves —
+  // holding and promoting are the two things that change it, and promoting
+  // always emits.
+  const [heldCount, setHeldCount] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    if (!window.VoidStore || !room?.id) { setHeldCount(0); return; }
+    window.VoidStore.listHeld(room.id)
+      .then(list => { if (!cancelled) setHeldCount(list.length); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [room?.id, eventsTotal]);
+
+  const workLine = useMemo(() => {
+    if (!window.PlainPosition) return null;
+    return window.PlainPosition.describeWorkspace(state, { held: heldCount }).line;
+  }, [state, heldCount]);
   const watchingCount = useMemo(
     () => (window.entitiesIWatch ? window.entitiesIWatch(state, myUserId).length : 0),
     [state, myUserId]
@@ -553,6 +572,10 @@ function Sidebar({
             title={canRename ? 'click to rename' : ''}
           >{headerName}</button>
         )}
+        {/* Where the whole effort stands, in counts only. No percentage and
+            no progress bar: there is no denominator, because you don't know
+            how many things a product needs until it's done. */}
+        {workLine && <div className="sb-room-work">{workLine}</div>}
         <div className="sb-room-sub">
           {setsCount} {setsCount === 1 ? 'set' : 'sets'} · {eventsTotal} {eventsTotal === 1 ? 'event' : 'events'}
           {lastEditLabel ? <> · last edit {lastEditLabel}</> : null}

@@ -63,6 +63,7 @@ input:focus,textarea:focus,select:focus{border-color:#000;box-shadow:inset 0 0 0
 .sb-room-name:disabled{cursor:default;color:var(--text-bright);opacity:1}
 .sb-room-name-input{display:block;width:100%;padding:0;border:none;border-bottom:1px solid var(--text-dim);background:transparent;font-family:inherit;font-size:14px;color:var(--text-bright);font-weight:700;letter-spacing:.2px;text-transform:lowercase;line-height:1.2;outline:none}
 .sb-room-name-input:focus{border-bottom-color:#000}
+.sb-room-work{font-size:11.5px;color:var(--text);margin-top:6px;font-weight:600;line-height:1.4}
 .sb-room-sub{font-size:11px;color:var(--text-dim);margin-top:4px}
 .sb-section{display:flex;flex-direction:column;padding:8px 0;border-bottom:1px solid var(--border)}
 .sb-section:last-of-type{border-bottom:none}
@@ -569,6 +570,13 @@ input:focus,textarea:focus,select:focus{border-color:#000;box-shadow:inset 0 0 0
 .rd-fglyph{color:var(--triad-structure);font-weight:700;font-style:italic}
 .rd-value{font-size:13px;color:var(--text-bright);min-height:24px;padding:4px 7px;border:1px solid transparent;cursor:text;white-space:pre-wrap;word-break:break-word}
 .rd-value:hover{border-color:var(--border);background:var(--surface-2)}
+/* provenance — the notes a thing was made from, laid out to be read */
+.rd-provenance{cursor:default;white-space:normal}
+.rd-provenance:hover{border-color:transparent;background:transparent}
+.rd-prov-head{font-size:11px;color:var(--text-faint);margin-bottom:6px}
+.rd-prov-note{display:flex;gap:9px;padding:6px 0;border-top:1px solid var(--border);font-size:12.5px;line-height:1.55}
+.rd-prov-when{flex:0 0 auto;font-family:var(--mono);font-size:10.5px;color:var(--text-faint);padding-top:2px}
+.rd-prov-text{min-width:0}
 .rd-value.num{font-variant-numeric:tabular-nums}
 .rd-value.is-empty{cursor:text}
 .rd-value.rd-derived{cursor:default;background:var(--surface-2);color:var(--text-dim)}

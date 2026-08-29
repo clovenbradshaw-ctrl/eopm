@@ -39,7 +39,15 @@ function fmtCell(value, type, opts) {
   if (type === 'multiselect' && Array.isArray(value)) {
     return { cls: 'str', text: value.join(', ') };
   }
-  if (type === 'json' && typeof value === 'object') return { cls: 'json', text: JSON.stringify(value) };
+  if (type === 'json' && typeof value === 'object') {
+    // A `came_from` record is the notes a thing was made from — readable
+    // content that JSON.stringify turns into noise. PlainPosition renders
+    // it as a sentence; anything else still falls through to raw JSON.
+    const prov = typeof window !== 'undefined' && window.PlainPosition
+      ? window.PlainPosition.describeProvenance(value) : null;
+    if (prov) return { cls: 'str', text: prov.text, title: prov.title };
+    return { cls: 'json', text: JSON.stringify(value) };
+  }
   // Rich text / long text: keep the colour of a normal string cell but tag it
   // so the grid can cap its width and ellipsize instead of letting one long
   // paragraph blow the whole column out to the right.
@@ -701,19 +709,21 @@ function EditableCell({ value, onCommit, type, heat, freshTs, shouldFocus, onFoc
       </td>
     );
   }
-  const { cls, text } = fmtCell(value, type);
+  const { cls, text, title: cellTitle } = fmtCell(value, type);
   const heatCls = heat ? heatClass(heat) : '';
   const freshCls = freshClass(freshTs);
   // Every column is width-capped + ellipsized now, so surface the full value on
-  // hover whenever there is one. Otherwise prefer a recency note, then the heat
-  // count, then the edit hint.
-  const title = (text && cls !== 'null')
-    ? text
-    : freshCls
-      ? `edited ${relTime(freshTs)} · click to edit`
-      : heat
-        ? `${heat} write${heat === 1 ? '' : 's'} · click to edit`
-        : 'click to edit · emits DEF';
+  // hover whenever there is one. A formatter that supplied its own title —
+  // provenance notes, a full date — means the cell text is a summary and the
+  // title is the substance, so it wins over echoing the summary back.
+  const title = cellTitle
+    || ((text && cls !== 'null')
+      ? text
+      : freshCls
+        ? `edited ${relTime(freshTs)} · click to edit`
+        : heat
+          ? `${heat} write${heat === 1 ? '' : 's'} · click to edit`
+          : 'click to edit');
   return <td className={`cell ${cls} ${heatCls} ${freshCls}`} onClick={startEdit} title={title}>{text}</td>;
 }
 
@@ -809,13 +819,32 @@ function DetailField({ value, type, onCommit }) {
       />
     );
   }
-  const { cls, text } = fmtCell(value, type);
+  // The notes a thing came from are the reason it exists. In the row detail
+  // there is room to actually read them, so they are laid out rather than
+  // summarised — this is the one place the full provenance belongs.
+  const prov = (type === 'json' && window.PlainPosition)
+    ? window.PlainPosition.describeProvenance(value) : null;
+  if (prov) {
+    return (
+      <div className="rd-value rd-provenance">
+        <div className="rd-prov-head">{prov.text}</div>
+        {value.notes.map((note, i) => (
+          <div className="rd-prov-note" key={i}>
+            {note.at && <span className="rd-prov-when">{new Date(note.at).toLocaleDateString()}</span>}
+            <span className="rd-prov-text">{note.text}</span>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  const { cls, text, title: cellTitle } = fmtCell(value, type);
   const empty = value === undefined || value === null || value === '';
   return (
     <div
       className={`rd-value ${cls} ${empty ? 'is-empty' : ''}`}
       onClick={startEdit}
-      title="click to edit · emits DEF"
+      title={cellTitle || 'click to edit'}
     >{empty ? <span className="rd-empty">empty</span> : text}</div>
   );
 }

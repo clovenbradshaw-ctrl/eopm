@@ -12,7 +12,8 @@ import assert from 'node:assert';
 globalThis.window ??= { addEventListener() {}, removeEventListener() {} };
 globalThis.indexedDB ??= { open() { return { addEventListener() {} }; } };
 const { fold } = await import('../src/fold.js');
-const { describeEntity, describeFinding, describeWorkspace, titleOf } = await import('../src/plain-position.js');
+const pp = await import('../src/plain-position.js');
+const { describeEntity, describeFinding, describeWorkspace, titleOf } = pp;
 
 let passed = 0;
 async function test(name, fn) {
@@ -135,6 +136,52 @@ await test('titleOf prefers a human name and falls back to the anchor', () => {
   assert.strictEqual(titleOf({ Title: 'Handoff', _anchor: 'x' }), 'Handoff');
   assert.strictEqual(titleOf({ _anchor: 'task_9f' }), 'task_9f');
   assert.strictEqual(titleOf(null), 'this');
+});
+
+// ── provenance ─────────────────────────────────────────────────────────
+
+await test('a provenance record reads as a sentence, not as JSON', () => {
+  const { describeProvenance } = pp;
+  const v = {
+    notes: [
+      { text: 'nobody knows what changed', at: '2026-07-04T10:00:00.000Z' },
+      { text: 'we tried a changelog', at: '2026-08-01T10:00:00.000Z' },
+      { text: 'every handoff, same question', at: '2026-08-20T10:00:00.000Z' },
+    ],
+    first_seen: '2026-07-04T10:00:00.000Z',
+  };
+  const d = describeProvenance(v);
+  assert.ok(!/[{}\[\]"]/.test(d.text), `still looks like JSON: ${d.text}`);
+  assert.ok(d.text.includes('3 notes'), d.text);
+  assert.ok(d.text.includes('Jul 4'), `should say how far back it goes: ${d.text}`);
+});
+
+await test('one note reads as one note, not "1 notes"', () => {
+  const d = pp.describeProvenance({ notes: [{ text: 'a thought', at: '2026-08-29T02:54:33.974Z' }], first_seen: '2026-08-29T02:54:33.974Z' });
+  assert.ok(d.text.startsWith('1 note,'), d.text);
+  assert.ok(!d.text.includes('1 notes'));
+});
+
+await test('the notes themselves survive into the tooltip, verbatim', () => {
+  const d = pp.describeProvenance({
+    notes: [{ text: 'first thought', at: '2026-08-01T10:00:00.000Z' }, { text: 'second thought', at: '2026-08-02T10:00:00.000Z' }],
+    first_seen: '2026-08-01T10:00:00.000Z',
+  });
+  assert.ok(d.title.includes('first thought'));
+  assert.ok(d.title.includes('second thought'));
+});
+
+await test('anything that is not a provenance record yields null, so JSON still renders', () => {
+  assert.strictEqual(pp.describeProvenance({ some: 'other json' }), null);
+  assert.strictEqual(pp.describeProvenance(null), null);
+  assert.strictEqual(pp.describeProvenance('a string'), null);
+  assert.strictEqual(pp.describeProvenance({ notes: 'not an array' }), null);
+});
+
+await test('a record with a missing or unparseable date still says something useful', () => {
+  const d = pp.describeProvenance({ notes: [{ text: 'no date here' }, { text: 'nor here' }] });
+  assert.ok(d.text.includes('2 notes'), d.text);
+  assert.ok(!/NaN|Invalid|undefined|null/.test(d.text), `leaked a broken date: ${d.text}`);
 });
 
 // ── the guard ──────────────────────────────────────────────────────────

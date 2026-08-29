@@ -38,11 +38,27 @@ const ev = (op, content, ts, sender = '@ada:example.org') =>
 
 // ── computeRhythm ────────────────────────────────────────────────────────
 
-await test('computeRhythm reports unmeasured below the move floor', () => {
+await test('computeRhythm reports unmeasured below the gap floor', () => {
   const state = fold([ev('ins', { anchor: 'a', entity_type: 'task', payload: {} }, 1000)]);
-  const r = computeRhythm(state, { minMoves: 50 });
+  const r = computeRhythm(state);
   eq(r.measured, false);
   eq(r.moves, 1);
+  eq(r.gaps, 0, 'one move produces no gap at all');
+});
+
+await test('a workspace a person has actually used for a few days can be measured', () => {
+  // The floor this replaced needed 50 moves. A solo workspace a fortnight
+  // old never reached it, so the diagnostic could never say anything —
+  // which made it dead code exactly where it was supposed to help.
+  const DAY = 86_400_000;
+  const events = [];
+  for (let i = 0; i < 5; i++) {
+    events.push(ev('ins', { anchor: `a${i}`, entity_type: 'task', payload: {} }, i * DAY));
+  }
+  const r = computeRhythm(fold(events));
+  eq(r.measured, true, 'five moves over five days is a measurable habit');
+  eq(r.gaps, 4);
+  assert.ok(Number.isFinite(r.max), 'the longest gap so far is what a silence is judged against');
 });
 
 await test('computeRhythm measures the median gap once enough moves exist', () => {
@@ -54,7 +70,7 @@ await test('computeRhythm measures the median gap once enough moves exist', () =
     events.push(ev('ins', { anchor: `a${i}`, entity_type: 'task', payload: {} }, i * HOUR));
   }
   const state = fold(events);
-  const r = computeRhythm(state, { minMoves: 50 });
+  const r = computeRhythm(state);
   eq(r.measured, true);
   eq(r.moves, 60);
   assert.ok(Math.abs(r.median - HOUR) < 1000, `expected ~1h median, got ${r.median}ms`);
@@ -64,7 +80,7 @@ await test('computeRhythm measures the median gap once enough moves exist', () =
 
 function bigWorkspace(extraEvents, baseTs = 0) {
   // 60 filler moves, one per entity, at a steady 1h cadence — enough to
-  // clear the minMoves floor and give a clean, known median (1h).
+  // clear the gap floor and give a clean, known median (1h).
   const events = [];
   const HOUR = 60 * 60 * 1000;
   for (let i = 0; i < 60; i++) {
@@ -75,18 +91,88 @@ function bigWorkspace(extraEvents, baseTs = 0) {
 
 await test('diagnose refuses to call anything stalled with no measured rhythm', () => {
   const state = fold([ev('ins', { anchor: 'a', entity_type: 'task', payload: {} }, Date.now())]);
-  const rhythm = computeRhythm(state, { minMoves: 50 });
+  const rhythm = computeRhythm(state);
   const d = diagnose(state.entities.a, state, rhythm);
   eq(d.stalled, false);
-  assert.ok(d.why.includes('not enough data'));
+  assert.ok(/too few/.test(d.why), `expected an honest reason, got: ${d.why}`);
+  eq(d.oddsIfNothingChanged, null, 'no evidence means no odds to quote');
 });
 
 await test('diagnose does not flag an entity touched recently, even with a measured rhythm', () => {
   const events = bigWorkspace([ev('ins', { anchor: 'fresh', entity_type: 'task', payload: {} }, Date.now())]);
   const state = fold(events);
-  const rhythm = computeRhythm(state, { minMoves: 50 });
+  const rhythm = computeRhythm(state);
   const d = diagnose(state.entities.fresh, state, rhythm);
   eq(d.stalled, false);
+});
+
+await test('a silence longer than any this workspace has had is flagged, with its odds', () => {
+  const HOUR = 3_600_000;
+  const now = Date.now();
+  // A steady hourly habit for the last two days, plus one entity last
+  // touched a week ago — longer than any gap this workspace has produced.
+  const events = [];
+  for (let i = 0; i < 48; i++) {
+    events.push(ev('ins', { anchor: `f${i}`, entity_type: 'filler', payload: {} }, now - (48 - i) * HOUR));
+  }
+  events.push(ev('ins', { anchor: 'old', entity_type: 'task', payload: {} }, now - 7 * 24 * HOUR));
+  const state = fold(events);
+  const rhythm = computeRhythm(state);
+  eq(rhythm.measured, true);
+
+  const d = diagnose(state.entities.old, state, rhythm);
+  eq(d.stalled, true, 'a week of silence in an hourly workspace is worth a look');
+  assert.ok(d.oddsIfNothingChanged > 0 && d.oddsIfNothingChanged < 1, 'the flag must quote its own strength');
+  eq(d.longerThan, rhythm.gaps);
+});
+
+await test('the odds quoted tighten as the workspace accumulates evidence', () => {
+  // Same verdict, different confidence: being the longest of 5 gaps is a
+  // 1-in-6 coincidence, being the longest of 50 is 1-in-51. The number is
+  // shown to the user precisely so a thin flag reads as thin.
+  const HOUR = 3_600_000;
+  const now = Date.now();
+  const build = n => {
+    const events = [];
+    for (let i = 0; i < n; i++) {
+      events.push(ev('ins', { anchor: `f${i}`, entity_type: 'filler', payload: {} }, now - (n - i) * HOUR));
+    }
+    events.push(ev('ins', { anchor: 'old', entity_type: 'task', payload: {} }, now - 400 * HOUR));
+    const state = fold(events);
+    return diagnose(state.entities.old, state, computeRhythm(state));
+  };
+  const thin = build(5);
+  const thick = build(50);
+  eq(thin.stalled, true);
+  eq(thick.stalled, true);
+  assert.ok(thick.oddsIfNothingChanged < thin.oddsIfNothingChanged,
+    `more evidence must mean a stronger claim (${thick.oddsIfNothingChanged} vs ${thin.oddsIfNothingChanged})`);
+});
+
+await test('a gap merely longer than the median, but not the longest, is NOT flagged', () => {
+  // The rule this replaced fired at 3x the median. On a workspace that
+  // genuinely goes quiet for long stretches sometimes, that turns an
+  // ordinary weekend into an alert.
+  const HOUR = 3_600_000;
+  const now = Date.now();
+  const at = h => now - h * HOUR;
+  const state = fold([
+    // Two old moves far apart — this workspace has gone quiet for weeks before.
+    ev('ins', { anchor: 'f0', entity_type: 'filler', payload: {} }, at(1000)),
+    ev('ins', { anchor: 'f1', entity_type: 'filler', payload: {} }, at(500)),
+    // Then a recent burst.
+    ev('ins', { anchor: 'f2', entity_type: 'filler', payload: {} }, at(10)),
+    ev('ins', { anchor: 'f3', entity_type: 'filler', payload: {} }, at(9)),
+    ev('ins', { anchor: 'f4', entity_type: 'filler', payload: {} }, at(8)),
+    ev('ins', { anchor: 'f5', entity_type: 'filler', payload: {} }, at(7)),
+    // Untouched for a day — longer than typical, nowhere near unprecedented.
+    ev('ins', { anchor: 'recent', entity_type: 'task', payload: {} }, at(25)),
+  ]);
+  const rhythm = computeRhythm(state);
+  const age = 25 * HOUR;
+  assert.ok(age > rhythm.median, `this gap IS longer than the median (${rhythm.median}ms)`);
+  assert.ok(age < rhythm.max, `but shorter than the longest (${rhythm.max}ms)`);
+  eq(diagnose(state.entities.recent, state, rhythm).stalled, false);
 });
 
 // ── diagnose: the five gap shapes ────────────────────────────────────────
@@ -100,7 +186,7 @@ await test('shape: defined content, zero structure → Differentiate', () => {
     ev('def', { anchor: 'mush', path: 'note', value: 'circle back on this' }, oldTs + 3),
   ]);
   const state = fold(events);
-  const rhythm = computeRhythm(state, { minMoves: 50 });
+  const rhythm = computeRhythm(state);
   const d = diagnose(state.entities.mush, state, rhythm);
   eq(d.stalled, true);
   eq(d.mode, 'Differentiate');
@@ -118,7 +204,7 @@ await test('shape: several unconnected siblings in one partition → Relate', ()
     ev('seg', { anchor: 'p3', partition: 'active' }, oldTs + 5),
   ]);
   const state = fold(events);
-  const rhythm = computeRhythm(state, { minMoves: 50 });
+  const rhythm = computeRhythm(state);
   const d = diagnose(state.entities.p1, state, rhythm);
   eq(d.stalled, true);
   eq(d.mode, 'Relate');
@@ -133,7 +219,7 @@ await test('shape: connected but never synthesized → Generate', () => {
     ev('con', { source_anchor: 'c1', target_anchor: 'c2', relation_type: 'relates' }, oldTs + 2),
   ]);
   const state = fold(events);
-  const rhythm = computeRhythm(state, { minMoves: 50 });
+  const rhythm = computeRhythm(state);
   const d = diagnose(state.entities.c1, state, rhythm);
   eq(d.stalled, true);
   eq(d.mode, 'Generate');
@@ -148,7 +234,7 @@ await test('shape: defined claim, no judgment → Relate-within-Interpretation, 
     ev('def', { anchor: 'claim', path: 'awarded_at', value: '2023-10-23' }, oldTs + 2),
   ]);
   const state = fold(events);
-  const rhythm = computeRhythm(state, { minMoves: 50 });
+  const rhythm = computeRhythm(state);
   const d = diagnose(state.entities.claim, state, rhythm);
   eq(d.stalled, true);
   eq(d.mode, 'Relate');
@@ -164,7 +250,7 @@ await test('shape: judged but never reframed → Generate-within-Interpretation'
     ev('eva', { anchor: 'judged', criterion: 'confirmed', result: true }, oldTs + 2),
   ]);
   const state = fold(events);
-  const rhythm = computeRhythm(state, { minMoves: 50 });
+  const rhythm = computeRhythm(state);
   const d = diagnose(state.entities.judged, state, rhythm);
   eq(d.stalled, true);
   eq(d.mode, 'Generate');
@@ -178,7 +264,7 @@ await test('wouldSettle never names a date pair that is not actually on the enti
     ev('def', { anchor: 'claim2', path: 'summary', value: 'no dates here' }, oldTs + 1),
   ]);
   const state = fold(events);
-  const rhythm = computeRhythm(state, { minMoves: 50 });
+  const rhythm = computeRhythm(state);
   const d = diagnose(state.entities.claim2, state, rhythm);
   eq(d.wouldSettle, []);
 });
@@ -310,7 +396,7 @@ await test('declared null: predicted mode vs. a naive "always guess the most com
   for (const s of scenarios) {
     const before = bigWorkspace(s.build(baseTs), baseTs);
     const stateBefore = fold(before);
-    const rhythm = computeRhythm(stateBefore, { minMoves: 50 });
+    const rhythm = computeRhythm(stateBefore);
     const diagnosis = diagnose(stateBefore.entities[s.focus], stateBefore, rhythm);
 
     const nextEvent = s.actualNext(baseTs);
