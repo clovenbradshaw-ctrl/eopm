@@ -296,10 +296,8 @@ function Kanban({ state, onEmit, entityType, myUserId }) {
                         ))}
                       </div>
                     )}
-                    {cycleFor(t._anchor) && (
-                      <div className="card-cycle-warn" title={cycleFor(t._anchor).reason}>
-                        ⚠ cycle in `{cycleFor(t._anchor).relation}`: {cycleFor(t._anchor).path.join(' → ')}
-                      </div>
+                    {cycleFor(t._anchor) && window.CardFinding && (
+                      <window.CardFinding finding={cycleFor(t._anchor)} state={state} />
                     )}
                     {t._evaluations && t._evaluations.length > 0 && (
                       <div className="evals">
@@ -310,8 +308,9 @@ function Kanban({ state, onEmit, entityType, myUserId }) {
                         ))}
                       </div>
                     )}
-                    {window.CubeCompass && (
-                      <window.CubeCompass entity={t} state={state} compact diagnosis={diagnosisFor(t._anchor)} />
+                    {window.CardStatus && (
+                      <window.CardStatus entity={t} state={state} compact
+                        onEmit={onEmit} onDefine={a => setEditingAnchor(a)} />
                     )}
                   </div>
                 );

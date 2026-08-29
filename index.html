@@ -873,6 +873,34 @@ table.dbgrid td.cell.anchor.anchor-link:hover{color:var(--triad-structure);text-
 
 /* ── Cube compass — where an entity sits in the making of itself ────────
    Un-fired is neutral, never red: a quiet dot just means "not yet". */
+/* card-status — the plain-language line that replaced the compass on cards.
+   Deliberately quiet: this is a description, not an alert. Nothing in here
+   is red, badged, or counted, because nothing here is overdue. */
+.card-status{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;padding:5px 0 0;font-size:11px;line-height:1.45}
+.card-status-text{color:var(--text-faint)}
+.card-status.compact .card-status-text{font-family:var(--mono);font-size:10.5px}
+.card-status-act{background:none;border:none;border-bottom:1px solid var(--border-strong);padding:0 0 1px;
+  margin:0;cursor:pointer;color:var(--text);font:inherit;font-size:10.5px;white-space:nowrap}
+.card-status-act:hover{background:var(--surface-2)}
+.card-status.rung-settled .card-status-text,.card-status.rung-reworked .card-status-text{color:var(--green,#3a7a4a)}
+.card-finding{margin-top:5px;padding:5px 7px;background:var(--surface-2);border-left:2px solid var(--border-strong);
+  font-size:10.5px;line-height:1.45;color:var(--text)}
+.cs-modal{max-width:440px}
+.cs-modal-title{font-size:14px;font-weight:600;margin-top:2px}
+.cs-modal-hint,.cs-modal-empty{font-size:11.5px;color:var(--text-faint);line-height:1.5;margin-bottom:10px}
+.cs-label{display:block;font-size:10.5px;color:var(--text-faint);margin:8px 0 4px}
+.cs-select,.cs-input{width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--border);
+  background:var(--surface);color:var(--text);font:inherit;font-size:12.5px}
+.cs-list{margin:6px 0 0;padding-left:18px;font-size:12px;line-height:1.6}
+.cs-radios{display:flex;gap:8px}
+.cs-radio{display:flex;align-items:center;gap:5px;padding:5px 9px;border:1px solid var(--border);
+  font-size:11.5px;cursor:pointer}
+.cs-radio.on{border-color:var(--border-strong);background:var(--surface-2)}
+.cs-modal-foot{display:flex;justify-content:flex-end;gap:8px;padding:12px 16px 14px}
+.cs-btn{padding:6px 12px;border:1px solid var(--border);background:var(--surface);color:var(--text);
+  font:inherit;font-size:12px;cursor:pointer}
+.cs-btn.primary{background:var(--accent);color:var(--surface);border-color:var(--accent)}
+.cs-btn:disabled{opacity:.45;cursor:default}
 .cube-compass{display:flex;flex-direction:column;gap:6px;font-family:var(--mono)}
 .cube-compass.compact{flex-direction:row;align-items:center;gap:7px;padding:4px 0 0}
 .cc-track{display:inline-flex;align-items:center;gap:0}
@@ -2183,11 +2211,19 @@ table.csv-preview tr:last-child td{border-bottom:none}
   import * as VoidStore from '/src/void-store.js';
   import * as Refutation from '/src/kernel/refutation.js';
   import * as Unblock from '/src/unblock.js';
+  import * as PlainPosition from '/src/plain-position.js';
+  import * as Recurrence from '/src/recurrence.js';
+  import * as Shred from '/src/shred.js';
   window.Cube = CubeKernel;
   window.CubePosition = CubePosition;
   window.VoidStore = VoidStore;
   window.Refutation = Refutation;
   window.Unblock = Unblock;
+  // PlainPosition is the ONLY sanctioned source of user-facing status text;
+  // see the canon-vocabulary guard in test/plain-position.test.mjs.
+  window.PlainPosition = PlainPosition;
+  window.Recurrence = Recurrence;
+  window.Shred = Shred;
 </script>
 
 <script src="vendor/react.js"></script>
@@ -2215,6 +2251,7 @@ table.csv-preview tr:last-child td{border-bottom:none}
 <script type="text/babel" data-presets="react" src="csv-import.jsx"></script>
 <script type="text/babel" data-presets="react" src="subscribe-button.jsx"></script>
 <script type="text/babel" data-presets="react" src="cube-compass.jsx"></script>
+<script type="text/babel" data-presets="react" src="card-status.jsx"></script>
 <script type="text/babel" data-presets="react" src="void-view.jsx"></script>
 <script type="text/babel" data-presets="react" src="sidebar.jsx"></script>
 <script type="text/babel" data-presets="react" src="entity-timeline.jsx"></script>
