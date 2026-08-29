@@ -34,17 +34,21 @@ export async function createRoom(name, roomType, meta = {}) {
     visibility: 'private',
     preset: 'private_chat',
     // Every member (PL 0) may publish the envelope-encryption state events:
-    // their identity public key, their wrapped workspace key, and their
-    // media-store block-chain head. All three are sender-scoped
-    // (state_key = own mxid, enforced by Matrix auth rules), so opening
-    // them up grants nothing beyond each member's own slots. Without this
-    // override state_default (50) would silently exclude invitees from the
-    // durable block chain.
+    // their identity public key, their wrapped workspace key, their
+    // media-store block-chain head, and their account self-report (which
+    // device claimed it, whether it has a password). All four are
+    // sender-scoped (state_key = own mxid, enforced by Matrix auth
+    // rules), so opening them up grants nothing beyond each member's own
+    // slots. Without this override state_default (50) would silently
+    // exclude invitees from the durable block chain — and, for
+    // member_status, would leave a link-invited guest unable to tell the
+    // room they still have no password.
     power_level_content_override: {
       events: {
         [`${ns}.member_key`]: 0,
         [`${ns}.wkey`]: 0,
         [`${ns}.blocks`]: 0,
+        [`${ns}.member_status`]: 0,
       },
     },
     initial_state: [

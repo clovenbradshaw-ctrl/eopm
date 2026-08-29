@@ -2,8 +2,19 @@
  * vault.js — Local-at-rest encryption
  *
  * Every byte we persist (OPFS event files, checkpoints, outbox payloads,
- * session token) is AES-GCM encrypted with a key derived from the user's
- * Matrix password via PBKDF2. The key lives only in memory.
+ * session token) is AES-GCM encrypted with the vault's **master key**,
+ * a random AES-256 key that lives only in memory while unlocked.
+ *
+ * The password does not encrypt data directly. It derives a wrapping key
+ * (PBKDF2) whose only job is to unwrap the master key:
+ *
+ *     password ──PBKDF2(salt)──▶ wrapping key ──unwraps──▶ master key ──▶ data
+ *
+ * That indirection is what makes a password change cheap. Changing it
+ * re-wraps 32 bytes and rewrites the metadata; the master key is
+ * untouched, so every byte already on disk stays readable. (Before v2
+ * the data key WAS the password-derived key, so a change orphaned the
+ * whole local cache — see the v1 migration in unlock().)
  *
  * Three states:
  *   - sealed   : no key in memory. Local data is opaque.
@@ -22,7 +33,7 @@ const PBKDF2_ITERATIONS = 250_000;
 const SALT_BYTES = 16;
 const IV_BYTES = 12;
 const KEY_BITS = 256;
-const VAULT_META_VERSION = 1;
+const VAULT_META_VERSION = 2;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -44,7 +55,7 @@ function unb64(s) {
   return out;
 }
 
-async function deriveKey(password, salt) {
+async function deriveKey(password, salt, iterations = PBKDF2_ITERATIONS, extractable = true) {
   const material = await crypto.subtle.importKey(
     'raw',
     encoder.encode(password),
@@ -52,15 +63,64 @@ async function deriveKey(password, salt) {
     false,
     ['deriveKey']
   );
-  // Extractable so we can stash a copy in sessionStorage for refresh-only
-  // persistence. The raw key never reaches localStorage or disk.
   return crypto.subtle.deriveKey(
-    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations: PBKDF2_ITERATIONS },
+    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations },
     material,
     { name: 'AES-GCM', length: KEY_BITS },
-    true,
+    extractable,
     ['encrypt', 'decrypt']
   );
+}
+
+/** The password-derived key. It only ever wraps the master key. */
+function deriveWrapKey(password, salt, iterations) {
+  return deriveKey(password, salt, iterations, false);
+}
+
+/**
+ * A fresh random master key. Extractable because it is what gets
+ * stashed for resume — the raw bytes reach sessionStorage always, and
+ * localStorage only under "keep me signed in" (see PERSIST_STASH_KEY).
+ */
+function generateMasterKey() {
+  return crypto.subtle.generateKey({ name: 'AES-GCM', length: KEY_BITS }, true, ['encrypt', 'decrypt']);
+}
+
+/** Seal the master key under a password-derived wrapping key. */
+async function wrapMaster(wrapKey, masterKey) {
+  const wrapIv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
+  const raw = new Uint8Array(await crypto.subtle.exportKey('raw', masterKey));
+  const wrapped = new Uint8Array(
+    await crypto.subtle.encrypt({ name: 'AES-GCM', iv: wrapIv }, wrapKey, raw)
+  );
+  raw.fill(0);
+  return { wrapIv, wrapped };
+}
+
+/** Unseal it again. Throws (OperationError) on the wrong password. */
+async function unwrapMaster(wrapKey, wrapIv, wrapped) {
+  const raw = new Uint8Array(
+    await crypto.subtle.decrypt({ name: 'AES-GCM', iv: wrapIv }, wrapKey, wrapped)
+  );
+  const key = await crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, true, ['encrypt', 'decrypt']);
+  raw.fill(0);
+  return key;
+}
+
+/** The "is this the right key" token, sealed under the master key. */
+async function makeVerifier(masterKey, userId) {
+  const verifierIv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
+  const verifierCt = new Uint8Array(await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: verifierIv }, masterKey, encoder.encode(`verify:${userId}`)
+  ));
+  return { verifierIv, verifierCt };
+}
+
+async function checkVerifier(masterKey, userId, verifierIv, verifierCt) {
+  try {
+    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: verifierIv }, masterKey, verifierCt);
+    return decoder.decode(new Uint8Array(plain)) === `verify:${userId}`;
+  } catch { return false; }
 }
 
 // sessionStorage key for the tab-scoped vault stash. Survives F5,
@@ -80,14 +140,29 @@ const SESSION_STASH_KEY = 'vault:session_stash';
 // out of listVaultUsers()'s scan.
 const PERSIST_STASH_KEY = 'vault_persist_stash';
 
+// Vault metadata (localStorage, non-secret). Two shapes are readable:
+//
+//   v1  { v:1, salt, verifierIv, verifierCt }
+//        The password-derived key IS the data key. Legacy; unlock()
+//        migrates these to v2 in place, keeping the same key bytes as
+//        the master so existing on-disk data stays readable.
+//
+//   v2  { v:2, salt, iters, wrapIv, wrapped, verifierIv, verifierCt }
+//        `wrapped` is the master key sealed under PBKDF2(password,salt);
+//        the verifier is sealed under the MASTER key, so the resume
+//        stash (which holds the master) verifies through the same path.
 function loadMeta(userId) {
   const raw = localStorage.getItem(metaKey(userId));
   if (!raw) return null;
   try {
     const obj = JSON.parse(raw);
-    if (obj.v !== VAULT_META_VERSION) return null;
+    if (obj.v !== 1 && obj.v !== VAULT_META_VERSION) return null;
     return {
+      v: obj.v,
       salt: unb64(obj.salt),
+      iters: obj.iters || PBKDF2_ITERATIONS,
+      wrapIv: obj.wrapIv ? unb64(obj.wrapIv) : null,
+      wrapped: obj.wrapped ? unb64(obj.wrapped) : null,
       verifierIv: unb64(obj.verifierIv),
       verifierCt: unb64(obj.verifierCt),
     };
@@ -96,10 +171,13 @@ function loadMeta(userId) {
   }
 }
 
-function saveMeta(userId, salt, verifierIv, verifierCt) {
+function saveMeta(userId, { salt, iters, wrapIv, wrapped, verifierIv, verifierCt }) {
   localStorage.setItem(metaKey(userId), JSON.stringify({
     v: VAULT_META_VERSION,
     salt: b64(salt),
+    iters,
+    wrapIv: b64(wrapIv),
+    wrapped: b64(wrapped),
     verifierIv: b64(verifierIv),
     verifierCt: b64(verifierCt),
   }));
@@ -144,17 +222,24 @@ class Vault {
    * `persist` controls where the resume key is stashed — see _stashKey.
    */
   async initialize(userId, password, { persist = false } = {}) {
+    const master = await generateMasterKey();
+    await this._sealUnder(userId, password, master, { persist });
+  }
+
+  /**
+   * Write meta that seals `master` under `password`, and adopt that
+   * master as the live key. Shared by initialize() (new random master),
+   * rekey() (existing master, new password) and the v1 migration
+   * (existing password-derived key promoted to master).
+   */
+  async _sealUnder(userId, password, master, { persist = false } = {}) {
     const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
-    const key = await deriveKey(password, salt);
+    const wrapKey = await deriveWrapKey(password, salt, PBKDF2_ITERATIONS);
+    const { wrapIv, wrapped } = await wrapMaster(wrapKey, master);
+    const { verifierIv, verifierCt } = await makeVerifier(master, userId);
 
-    const verifierIv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
-    const verifierPlain = encoder.encode(`verify:${userId}`);
-    const verifierCt = new Uint8Array(
-      await crypto.subtle.encrypt({ name: 'AES-GCM', iv: verifierIv }, key, verifierPlain)
-    );
-
-    saveMeta(userId, salt, verifierIv, verifierCt);
-    this._key = key;
+    saveMeta(userId, { salt, iters: PBKDF2_ITERATIONS, wrapIv, wrapped, verifierIv, verifierCt });
+    this._key = master;
     this._userId = userId;
     this._persist = persist;
     await this._stashKey();
@@ -170,36 +255,47 @@ class Vault {
   async unlock(userId, password, { persist = false } = {}) {
     const meta = loadMeta(userId);
     if (!meta) return false;
-    const candidate = await deriveKey(password, meta.salt);
-    try {
-      const plain = await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv: meta.verifierIv },
-        candidate,
-        meta.verifierCt
-      );
-      if (decoder.decode(new Uint8Array(plain)) !== `verify:${userId}`) return false;
-      this._key = candidate;
-      this._userId = userId;
-      this._persist = persist;
-      await this._stashKey();
-      this._notify();
+
+    // v1: the password-derived key was the data key. Verify it the old
+    // way, then promote those exact key bytes to the master and rewrite
+    // the meta as v2 — nothing on disk needs re-encrypting, and the next
+    // password change becomes a 32-byte re-wrap instead of a cache wipe.
+    if (meta.v === 1) {
+      const legacy = await deriveKey(password, meta.salt, PBKDF2_ITERATIONS, true);
+      if (!(await checkVerifier(legacy, userId, meta.verifierIv, meta.verifierCt))) return false;
+      await this._sealUnder(userId, password, legacy, { persist });
       return true;
-    } catch {
-      return false;
     }
+
+    let master;
+    try {
+      const wrapKey = await deriveWrapKey(password, meta.salt, meta.iters);
+      master = await unwrapMaster(wrapKey, meta.wrapIv, meta.wrapped);
+    } catch {
+      return false;   // wrong password: the GCM tag fails to verify
+    }
+    if (!(await checkVerifier(master, userId, meta.verifierIv, meta.verifierCt))) return false;
+
+    this._key = master;
+    this._userId = userId;
+    this._persist = persist;
+    await this._stashKey();
+    this._notify();
+    return true;
   }
 
   /**
-   * Re-key after a password change. Existing data stays decryptable
-   * with the old key until callers rewrite it; this is intentionally
-   * not handled here.
+   * Re-seal the vault under a new password. The master key — and so
+   * every byte already written to OPFS, the outbox, the encrypted
+   * session and the secret stash — is unchanged and stays readable.
+   * Only the wrapping is redone.
    */
   async rekey(userId, newPassword) {
     if (!this.isUnlocked() || this._userId !== userId) {
       throw new Error('Vault must be unlocked for the same user to rekey');
     }
     // Preserve the user's persistence choice across a password change.
-    await this.initialize(userId, newPassword, { persist: this._persist });
+    await this._sealUnder(userId, newPassword, this._key, { persist: this._persist });
   }
 
   /** Lock: clear key from memory, keep data on disk. */
@@ -289,10 +385,9 @@ class Vault {
       const key = await crypto.subtle.importKey(
         'raw', keyBytes, { name: 'AES-GCM' }, true, ['encrypt', 'decrypt']
       );
-      const plain = await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv: meta.verifierIv }, key, meta.verifierCt
-      );
-      if (decoder.decode(new Uint8Array(plain)) !== `verify:${parsed.userId}`) {
+      // The verifier is sealed under the master key in both meta
+      // versions' *live* form, so one check covers v1 and v2 stashes.
+      if (!(await checkVerifier(key, parsed.userId, meta.verifierIv, meta.verifierCt))) {
         this._clearStash();
         return false;
       }

@@ -46,6 +46,50 @@ function eventSummary(event) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Structural conflicts — cycles and broken 1:1 relations touching this
+// entity, named where the conflict is. Read-only: the connection this
+// finding is about already exists in the log, and nothing here undoes it.
+// ─────────────────────────────────────────────────────────────────────────
+
+function StructuralConflicts({ entity, state, allEventsInRoom }) {
+  const R = window.Refutation;
+  const findings = useMemo(() => {
+    if (!R || !entity) return [];
+    const anchor = entity._anchor;
+    const cycles = R.findCycles(state, { relation: 'blocks' }).filter(f => f.path.includes(anchor));
+    const uniqueness = R.findUniquenessViolations(state, { events: allEventsInRoom })
+      .filter(f => f.holder === anchor || f.conflicting.includes(anchor));
+    return [...cycles, ...uniqueness];
+  }, [R, entity, state, allEventsInRoom]);
+
+  if (!R || findings.length === 0) return null;
+
+  return (
+    <section className="page-section">
+      <div className="page-section-head">
+        <h2 className="page-section-label">structural conflicts</h2>
+        <span className="page-section-sub">named, not blocking</span>
+      </div>
+      {findings.map((f, i) => (
+        <div key={i} className="sc-finding">
+          <div className="sc-finding-head">
+            ⚠ {f.type === 'cycle' ? 'CYCLE' : 'UNIQUENESS'} — {f.type === 'cycle'
+              ? `a loop in \`${f.relation}\``
+              : `two ${f.direction === 'source' ? 'targets for one source' : 'sources for one target'} on \`${f.relation}\``}
+          </div>
+          <div className="sc-finding-body">{f.reason || `${f.holder} already has ${f.conflicting.join(', ')} via \`${f.relation}\``}</div>
+          <div className="sc-finding-meta">
+            rule: <code>{f.rule}</code> · {f.type === 'cycle'
+              ? <span>a structural rule, not a schema declaration</span>
+              : <span>declared by: {f.giver ? <b>{f.giver}</b> : <i>unknown (schema DEF not in this room's log)</i>}</span>}
+          </div>
+        </div>
+      ))}
+    </section>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // EntityTimelineView
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -57,6 +101,12 @@ function EntityTimelineView({
   // List of sibling entities of the same type — for the picker
   const siblings = useMemo(() => Object.values(state.entities).filter(e => e._type === entityType), [state.entities, entityType]);
   const entity = state.entities[entityAnchor];
+
+  const diagnosis = useMemo(() => {
+    if (!window.Unblock || !entity) return null;
+    const rhythm = window.Unblock.computeRhythm(state, { events: allEventsInRoom });
+    return window.Unblock.diagnose(entity, state, rhythm);
+  }, [entity, state, allEventsInRoom]);
 
   // Events that touched this anchor
   const events = useMemo(() => {
@@ -141,6 +191,12 @@ function EntityTimelineView({
           </h1>
           <div className="page-hero-sub" style={{display:'flex',alignItems:'center',gap:14,flexWrap:'wrap'}}>
             <span>{events.length} event{events.length !== 1 ? 's' : ''} touched this anchor</span>
+            {window.IterationView && setSelection && (
+              <button
+                className="tv-inline-link"
+                onClick={() => setSelection({ kind: 'slice', sliceId: `${entityType}.iteration.${entityAnchor}`, sliceKind: 'iteration', tableId: entityType, entityAnchor })}
+              >⊛ iterations{state.frames?.some(f => f.scope === entityAnchor) ? ` (${state.frames.filter(f => f.scope === entityAnchor).length})` : ''} →</button>
+            )}
             {siblings.length > 1 && (
               <span style={{display:'flex',alignItems:'center',gap:6}}>
                 <span style={{color:'var(--text-faint)',fontSize:11,textTransform:'uppercase',letterSpacing:1.2}}>jump to:</span>
@@ -188,6 +244,18 @@ function EntityTimelineView({
             )}
           </div>
         </section>
+
+        {window.CubeCompass && (
+          <section className="page-section">
+            <div className="page-section-head">
+              <h2 className="page-section-label">cube position</h2>
+              <span className="page-section-sub">where this sits in the making of itself</span>
+            </div>
+            <window.CubeCompass entity={entity} state={state} diagnosis={diagnosis} />
+          </section>
+        )}
+
+        <StructuralConflicts entity={entity} state={state} allEventsInRoom={allEventsInRoom} />
 
         <section className="page-section">
           <div className="page-section-head">

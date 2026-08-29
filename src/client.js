@@ -27,6 +27,9 @@ import { clearAll as clearOutbox } from './outbox.js';
 import { watchSync } from './network.js';
 import { wipeMediaCache } from './media.js';
 import { wipeManifest } from './roomManifest.js';
+import { deviceDisplayName } from './device.js';
+import { encodeInviteToken, decodeInviteToken, encodeJoinToken, decodeJoinToken,
+         INVITE_TTL_MS } from './invitelink.js';
 
 let client = null;
 let _watchSyncUnsub = null;
@@ -684,7 +687,7 @@ function dropSession(userId) {
 
 // ── Public API ──
 
-export async function login(homeserver, username, password, { persist = false } = {}) {
+export async function login(homeserver, username, password, { persist = false, deviceName } = {}) {
   const user = username.replace(/^@/, '').split(':')[0];
 
   progress('Resolving homeserver…');
@@ -697,7 +700,11 @@ export async function login(homeserver, username, password, { persist = false } 
     tmp.login('m.login.password', {
       identifier: { type: 'm.id.user', user },
       password,
-      initial_device_display_name: 'Matrix Events',
+      // Name the device after what it actually is ("iPhone · Safari").
+      // An account whose owner has no password lives entirely on its
+      // devices, so a device list of identical "Matrix Events" rows is
+      // the difference between "revoke the one I lost" and guesswork.
+      initial_device_display_name: deviceName || deviceDisplayName(),
     }),
     30000,
     'Login request'
@@ -903,27 +910,31 @@ export async function register(homeserver, { seed, username, registrationToken }
 }
 
 // ── Invite links ────────────────────────────────────────────────────────
-// Everything a newcomer needs to open a guest account rides in the URL
-// fragment (#welcome=…), which browsers never send to a server. A link for
-// someone who already has an account carries no secret at all (#join=…) —
-// just enough to find and enter the right room once they sign in themselves.
-function b64urlEncode(str) { return btoa(unescape(encodeURIComponent(str))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
-function b64urlDecode(str) { return decodeURIComponent(escape(atob(String(str).replace(/-/g, '+').replace(/_/g, '/')))); }
+//
+// The payload codec lives in invitelink.js (pure, unit-tested). These
+// wrappers add the only part that needs a browser: the page's own URL.
+// See that module for what each field is and why it travels in the
+// fragment rather than the query string.
 
 export function buildInviteLink(payload) {
-  return location.origin + location.pathname + '#welcome=' + b64urlEncode(JSON.stringify(payload || {}));
+  return location.origin + location.pathname + '#welcome=' + encodeInviteToken(payload);
 }
-export function parseInviteToken(token) {
-  try { const p = JSON.parse(b64urlDecode(token)); if (p && p.u && p.p && p.hs) return p; } catch (e) {}
-  return null;
-}
+export function parseInviteToken(token) { return decodeInviteToken(token); }
+
 export function buildJoinLink(payload) {
-  return location.origin + location.pathname + '#join=' + b64urlEncode(JSON.stringify(payload || {}));
+  return location.origin + location.pathname + '#join=' + encodeJoinToken(payload);
 }
-export function parseJoinToken(token) {
-  try { const p = JSON.parse(b64urlDecode(token)); if (p && p.r) return p; } catch (e) {}
-  return null;
-}
+export function parseJoinToken(token) { return decodeJoinToken(token); }
+
+export { INVITE_TTL_MS };
+
+/**
+ * A random secret for an account whose owner has not chosen a password.
+ * Same generator as the link's one-time password — this is the value
+ * that replaces it on first open and then lives, vault-encrypted, on the
+ * claiming device. Exported so the claim flow can mint one.
+ */
+export function generateDeviceSecret() { return randomPassword(); }
 
 // ── Password reset & change ──────────────────────────────────────────────
 //
@@ -1042,10 +1053,16 @@ export async function completePasswordReset(creds, newPassword) {
  * default other devices keep their sessions (logoutDevices=false) so this
  * doesn't silently sign the user out everywhere.
  *
- * Note: the local vault key is derived from the Matrix password, so after a
- * change the on-device cache can only be unlocked with the NEW password. The
- * next cold login with the new password rotates the vault automatically (see
- * the mismatch handling in login()); cached history re-syncs from the server.
+ * This changes the password on the HOMESERVER only. The caller is
+ * responsible for bringing the local vault and the envelope identity onto
+ * the new password — setAccountPassword() in main.js does all three
+ * together, and is what the UI calls.
+ *
+ * On the device doing the change, vault.rekey() re-wraps the master key
+ * and the on-disk cache stays readable (see vault.js meta v2). OTHER
+ * devices still hold metadata sealed under the old password: their next
+ * cold login hits the mismatch handling in login(), resets the vault, and
+ * re-syncs history from the server.
  */
 export async function changePassword(oldPassword, newPassword, { logoutDevices = false } = {}) {
   if (!client) throw new Error('Not connected');
