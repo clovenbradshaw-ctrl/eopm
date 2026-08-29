@@ -47,16 +47,43 @@ const QUIET_PATTERNS = [
   'Adding default global',            // push-rule setup noise on every login
   'GroupCallEventHandler',            // call subsystem we disable anyway
 ];
+// A device whose crypto store was rebuilt under it collides with its own
+// already-published one-time keys, and the SDK retries that upload
+// forever. Prevention lives in restoreSession/orphanDevice, but a session
+// already in this state on someone's machine never reaches that code — it
+// just loops. Spotting the error is the only way back for those.
+const OTK_CONFLICT = /One time key .* already exists/i;
+
+function looksLikeOtkConflict(msg) {
+  return msg.some(m => {
+    const s = typeof m === 'string' ? m : (m && m.message) || '';
+    return OTK_CONFLICT.test(s);
+  });
+}
+
 function makeQuietLogger() {
   const noop = () => {};
   const passes = (msg) => {
     const first = typeof msg[0] === 'string' ? msg[0] : '';
     return !QUIET_PATTERNS.some((p) => first.includes(p));
   };
+  let otkReported = false;
   const self = {
     trace: noop, debug: noop, info: noop, log: noop,
     warn: (...m) => { if (passes(m)) console.warn(...m); },
-    error: (...m) => { if (passes(m)) console.error(...m); },
+    error: (...m) => {
+      // Report once and clear the session, then swallow the rest: this
+      // error arrives several times a second and drowns the console
+      // without ever telling the user the one thing that helps.
+      if (looksLikeOtkConflict(m)) {
+        if (!otkReported) {
+          otkReported = true;
+          onOtkConflict();
+        }
+        return;
+      }
+      if (passes(m)) console.error(...m);
+    },
     getChild: () => self,
   };
   return self;
@@ -201,17 +228,69 @@ function warmUpIndexedDB({ tries = 12, intervalMs = 250 } = {}) {
  * user. Avoids hitting the exception-based retry path inside
  * initCryptoWithRetry, which has worse timing characteristics.
  */
+/**
+ * Returns true when it actually wiped the store — see restoreSession for
+ * why the caller has to care.
+ */
 async function ensureCryptoStoreOwner(userId) {
   // Wake IndexedDB before any crypto-store access (delete below or the SDK's
   // own open in initRustCrypto). On Safari the first cold open can hang, which
   // is what stalls login until a manual refresh — see warmUpIndexedDB.
   await warmUpIndexedDB();
   const prior = localStorage.getItem(CRYPTO_OWNER_KEY);
+  let wiped = false;
   if (prior && prior !== userId) {
     progress(`Crypto store belonged to ${prior}; resetting for ${userId}`);
     await clearCryptoStore();
+    wiped = true;
   }
   localStorage.setItem(CRYPTO_OWNER_KEY, userId);
+  return wiped;
+}
+
+/**
+ * A device whose crypto store was destroyed can never be used again.
+ *
+ * Its Olm account is gone, so its identity keys are unrecoverable and no
+ * one can encrypt to it. Worse, the homeserver still holds the one-time
+ * keys that device already published: a rebuilt store starts its OTK
+ * counter from scratch and every upload collides with a slot the server
+ * has filled —
+ *
+ *   M_UNKNOWN [400] One time key signed_curve25519:AAAAAAAAADM already exists
+ *
+ * — which the SDK retries forever. That wedges the head of the outgoing
+ * request queue, so to-device traffic and sync stall behind it and the app
+ * appears to load its data very slowly, for a reason nothing in the UI
+ * explains.
+ *
+ * The access token is bound to the device, so there is no way to ask for a
+ * fresh device while reusing it. The only exit is a new login. Dropping the
+ * saved session makes the caller take that path.
+ */
+function orphanDevice(userId, why) {
+  console.warn(`[matrix] device for ${userId} lost its crypto store (${why}); dropping the saved session so the next sign-in mints a new device`);
+  try { dropSession(userId); } catch (e) { /* nothing left to drop */ }
+}
+
+/**
+ * A session that reached the wedged state before the guard above existed.
+ * Nothing can rescue this device in-flight, so stop the retry storm, clear
+ * the saved session, and say plainly that signing in again fixes it —
+ * otherwise the only symptom is data that loads impossibly slowly.
+ */
+function onOtkConflict() {
+  const userId = client?.getUserId?.();
+  console.warn(
+    '[matrix] this device\'s encryption keys no longer match what the server holds for it, ' +
+    'so it cannot upload new ones. Sign in again to get a fresh device — your data is safe ' +
+    'and nothing needs to be deleted.'
+  );
+  if (userId) orphanDevice(userId, 'its one-time keys collided with the server\'s');
+  // Left running, the SDK keeps re-sending the doomed upload at the head
+  // of the outgoing queue, and sync crawls along behind it.
+  try { client?.stopClient(); } catch (e) { /* already stopped */ }
+  progress('This device needs to sign in again — its encryption keys are out of step with the server.');
 }
 
 function isCryptoStoreMismatch(err) {
@@ -220,9 +299,14 @@ function isCryptoStoreMismatch(err) {
          msg.includes('account in the store does not match');
 }
 
+/**
+ * Returns true when the store had to be wiped to get crypto up. The device
+ * that was in it is dead from that moment on — see orphanDevice.
+ */
 async function initCryptoWithRetry(c, timeoutMs = 30000) {
   try {
     await withTimeout(c.initRustCrypto(), timeoutMs, 'Crypto init');
+    return false;
   } catch (err) {
     // Any failure here — known mismatch, corrupted indexed DB, or partial
     // wipe from a previous session — recovers the same way: drop the
@@ -231,6 +315,7 @@ async function initCryptoWithRetry(c, timeoutMs = 30000) {
     progress('Crypto init failed — clearing crypto store and retrying: ' + err.message);
     try { await clearCryptoStore(); } catch {}
     await withTimeout(c.initRustCrypto(), timeoutMs, 'Crypto init (retry)');
+    return true;
   }
 }
 
@@ -1115,12 +1200,25 @@ export async function restoreSession(userId) {
     cryptoCallbacks: { getSecretStorageKey },
     logger: QUIET_LOGGER,
   });
-  await ensureCryptoStoreOwner(sid);
+  const ownerWiped = await ensureCryptoStoreOwner(sid);
   progress('Restoring session…');
+  let initWiped = false;
   try {
-    await initCryptoWithRetry(client);
+    initWiped = await initCryptoWithRetry(client);
   } catch (e) {
     progress(`Crypto init failed (continuing offline): ${e.message}`);
+  }
+
+  // Either wipe just orphaned this session's device. Carrying on would
+  // rebuild an Olm account under a device whose one-time keys the server
+  // already holds, and every upload from here on would 400 forever. Bail
+  // out instead: the caller's `needsLogin` path signs in again and the
+  // homeserver hands back a fresh device.
+  if (ownerWiped || initWiped) {
+    orphanDevice(sid, ownerWiped ? 'another account signed in here' : 'the store had to be rebuilt');
+    try { client.stopClient(); } catch (e) { /* never started */ }
+    client = null;
+    return null;
   }
 
   let sessionExpired = false;
