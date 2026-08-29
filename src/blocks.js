@@ -29,11 +29,22 @@
  * (room state) → blocks (media store) recovers the full event log with
  * no device, megolm session, or key backup involved.
  *
- * Per-sender chains: each user appends only their OWN events, so there
- * is no multi-writer coordination. Readers merge every member's chain
- * and dedup by event_id. The chain is a recovery layer — the room
- * timeline remains the live transport — so a rare duplicate or a fork
- * from two racing devices costs nothing (dedup on read).
+ * Per-sender chains: each user writes only to their OWN chain (state_key
+ * is their mxid), so there is no multi-writer coordination. Readers merge
+ * every member's chain and dedup by event_id. The chain is a recovery
+ * layer — the room timeline remains the live transport — so a duplicate
+ * or a fork from two racing devices costs nothing (dedup on read).
+ *
+ * What a member puts IN their chain is decided by reachability, not
+ * authorship (see queueBlockEvents in main.js). Chaining only your own
+ * events left the archive incomplete: somebody else's work stayed durable
+ * only while their chain remained readable, and a chain written under a
+ * superseded workspace key never becomes readable again. Those events
+ * still sat in the browser of whoever was online when Megolm delivered
+ * them — visible to that person, unreachable to every later member, and
+ * one cache clear from being gone. So anything not found in a readable
+ * chain gets archived by whoever can still see it. That relies on exactly
+ * the dedup-on-read this design already had.
  */
 
 import { getClient } from './client.js';

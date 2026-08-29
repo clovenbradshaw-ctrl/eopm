@@ -897,8 +897,7 @@ async function openRoom(roomId) {
       for (const e of newEvents) reconcilePendingByTxn(e);
       if (added.length > 0) {
         const plain = added.map(toPlain).filter(isOpEvent);
-        const cur = roomEvents.get(roomId) || [];
-        roomEvents.set(roomId, cur.concat(plain));
+        appendRoomEvents(roomId, plain);
         recordRoomCount(roomId, store.getCount());
         queueBlockEvents(roomId, plain);
         notify('events');
@@ -925,8 +924,7 @@ async function openRoom(roomId) {
         const added = await store.append([event]);
         if (added.length > 0) {
           const plain = added.map(toPlain).filter(isOpEvent);
-          const cur = roomEvents.get(roomId) || [];
-          roomEvents.set(roomId, cur.concat(plain));
+          appendRoomEvents(roomId, plain);
           queueBlockEvents(roomId, plain);
           notify('events');
         }
@@ -936,8 +934,7 @@ async function openRoom(roomId) {
         const added = await store.append([event]);
         if (added.length > 0) {
           const plain = added.map(toPlain).filter(isOpEvent);
-          const cur = roomEvents.get(roomId) || [];
-          roomEvents.set(roomId, cur.concat(plain));
+          appendRoomEvents(roomId, plain);
           queueBlockEvents(roomId, plain);
           notify('events');
         }
@@ -947,8 +944,7 @@ async function openRoom(roomId) {
           const added = await store.append([event]);
           if (added.length > 0) {
             const plain = added.map(toPlain).filter(isOpEvent);
-            const cur = roomEvents.get(roomId) || [];
-            roomEvents.set(roomId, cur.concat(plain));
+            appendRoomEvents(roomId, plain);
             queueBlockEvents(roomId, plain);
           }
           reconcilePendingByTxn(event);
@@ -1086,8 +1082,7 @@ async function initBlockSync(roomId, store) {
       const added = await store.append(events);
       if (added.length > 0) {
         const plain = added.map(toPlain).filter(isOpEvent);
-        const cur = roomEvents.get(roomId) || [];
-        roomEvents.set(roomId, cur.concat(plain));
+        appendRoomEvents(roomId, plain);
         ctx.recovered = plain.length;
         logProgress(`Recovered ${plain.length} event${plain.length === 1 ? '' : 's'} from the block chain`);
         notify('events');
@@ -1110,30 +1105,128 @@ async function initBlockSync(roomId, store) {
     }
   }
 
-  // UP: back-fill our own committed history the chain doesn't have yet.
-  // First run on an existing workspace chains its entire history once;
-  // afterwards this only catches edits made while the chain was failing.
-  queueBlockEvents(roomId, roomEvents.get(roomId) || []);
+  // UP: back-fill the committed history the chain doesn't have yet.
+  //
+  // Read this from the STORE rather than from `roomEvents`. The in-memory
+  // map is whatever happens to have been loaded so far, and this runs once
+  // per room open — so on a cold start it saw a partial set, chained that,
+  // and never looked again (openRoom returns early when the room is already
+  // open). On a real workspace that left 49 of 98 events archived: not
+  // failing, not erroring, simply never offered. The store is the durable
+  // set by definition, which is exactly the question being asked here.
+  await archiveUnchained(roomId);
 }
 
-// Queue committed self-sent op-events for the next block. Safe to call
-// with any event mix — everything that doesn't belong in our chain
-// (others' events, pending optimistic echoes, already-chained ids) is
-// filtered here, so call sites stay one-liners.
+/**
+ * Archive everything this room holds that no readable chain has yet.
+ *
+ * Separate from initBlockSync, and callable, because initBlockSync runs at
+ * most once per room per session (it returns early once a context exists).
+ * That made the back-fill a single shot against whatever had loaded by then
+ * — on a real workspace it left 49 of 98 events archived and no way to try
+ * again short of a reload, which hit the same early return.
+ *
+ * Takes the UNION of the on-disk store and what is in memory, because
+ * neither is a superset of the other and the goal is everything this member
+ * can see. The store's own count is an in-memory tally that runs ahead of
+ * the bytes actually on disk, so reading the file alone came back with 49
+ * of 98; `roomEvents` meanwhile holds what was recovered or streamed this
+ * session and may not have been written down yet. Whatever is missing from
+ * a chain in either place is missing for every future member.
+ *
+ * Returns what it found so callers (and tests) can see the numbers instead
+ * of inferring them.
+ */
+async function archiveUnchained(roomId) {
+  const ctx = roomBlockSync.get(roomId);
+  if (!ctx || ctx.disabled || !ctx.wck) {
+    return { ok: false, reason: 'block chain not active for this room' };
+  }
+
+  const byId = new Map();
+  const add = (list) => {
+    for (const e of list || []) {
+      const plain = toPlain(e);
+      if (plain?.event_id && isOpEvent(plain) && !byId.has(plain.event_id)) {
+        byId.set(plain.event_id, plain);
+      }
+    }
+  };
+
+  const store = roomStores.get(roomId);
+  let fromStore = 0;
+  if (store) {
+    try {
+      const all = await store.getAll();
+      fromStore = all.length;
+      add(all);
+    } catch (e) { console.warn('[blocks] could not read the store for back-fill:', e?.message || e); }
+  }
+  const mem = roomEvents.get(roomId) || [];
+  add(mem);
+
+  const history = [...byId.values()];
+
+  const before = ctx.chained.size;
+  const unchained = history.filter(e => e?.event_id && !ctx.chained.has(e.event_id));
+  if (unchained.length > 0) {
+    console.info(`[blocks] ${unchained.length} of ${history.length} events are in no readable chain — archiving them so new members can see them`);
+  }
+  queueBlockEvents(roomId, history);
+
+  return {
+    ok: true,
+    held: history.length,
+    fromStore,
+    fromMemory: mem.length,
+    chainedBefore: before,
+    newlyQueued: ctx.chained.size - before,
+    queueDepth: ctx.queue.length,
+  };
+}
+
+// Queue committed op-events for the next block. Safe to call with any event
+// mix — pending optimistic echoes and anything already in a readable chain
+// are filtered here, so call sites stay one-liners.
+//
+// This used to queue only events WE sent (`e.sender !== me`), which quietly
+// made the archive incomplete for everyone who joined later. Each member
+// chains their own events, so somebody else's work is only durable while
+// THEIR chain stays readable — and a chain written under a superseded
+// workspace key never becomes readable again. Meanwhile the events survive
+// perfectly well in the browser of anyone who was online when they arrived,
+// because Megolm delivered them live. That is the whole gap: an event one
+// person can see and no new member can, sitting one cache clear away from
+// being lost to the workspace entirely.
+//
+// So the rule is now about reachability rather than authorship: if an event
+// is not in any chain we could read, archive it. `sender` and `event_id`
+// travel with it untouched, so re-archiving never restates who wrote it, and
+// the fold dedups by `event_id` — a re-archived event replays to exactly the
+// same state.
+//
+// It is self-limiting. `ctx.chained` is the union of every chain that
+// decrypted on this load, so the moment one member archives an orphan the
+// rest see it there and skip it.
 function queueBlockEvents(roomId, plainEvents) {
   const ctx = roomBlockSync.get(roomId);
   if (!ctx || ctx.disabled || !ctx.wck) return;
   const me = activeSession?.mxid;
   if (!me) return;
   let queued = 0;
+  let rescued = 0;
   for (const e of plainEvents) {
-    if (!e || e._pending || e.sender !== me) continue;
+    if (!e || e._pending) continue;
     if (!e.event_id || e.event_id.startsWith('~') || !e.event_id.startsWith('$')) continue;
     if (!isOpEvent(e)) continue;
     if (ctx.chained.has(e.event_id)) continue;
     ctx.chained.add(e.event_id);   // queued counts as chained; failures requeue
     ctx.queue.push(e);
     queued++;
+    if (e.sender !== me) rescued++;
+  }
+  if (rescued > 0) {
+    console.info(`[blocks] archiving ${rescued} event${rescued === 1 ? '' : 's'} from other members that no readable chain held — new members would not have seen them`);
   }
   if (queued > 0) scheduleBlockFlush(roomId);
 }
@@ -1391,6 +1484,22 @@ function kickColdSync() {
 // reordered or removed — which is exactly what lets the UI fold it
 // incrementally and cache the result. The array reference changes on
 // append, but the event_id at any given index never does.
+// Append events to a room's in-memory list, skipping any event_id already
+// there. The same event legitimately arrives from more than one source —
+// the OPFS store on open, the megolm timeline, and the block chain during
+// recovery — and `cur.concat(plain)` kept every copy. The fold dedups by
+// event_id so state was never wrong, but the room's event count was
+// inflated (a workspace of 49 events reported 98), memory held each event
+// twice, and any code reasoning about "how much is here" was misled.
+function appendRoomEvents(roomId, plain) {
+  const cur = roomEvents.get(roomId) || [];
+  const seen = new Set(cur.map(e => e?.event_id));
+  const fresh = plain.filter(e => e?.event_id && !seen.has(e.event_id));
+  if (fresh.length === 0) return 0;
+  roomEvents.set(roomId, cur.concat(fresh));
+  return fresh.length;
+}
+
 function getCommittedForRoom(roomId) {
   return roomEvents.get(roomId) || [];
 }
@@ -2139,6 +2248,9 @@ window.MatrixLive = {
   maxUploadBytes,
   // Media-store block chain (durable storage / wipe recovery)
   getBlockStats,
+  // Force the durable archive to catch up with what this room holds.
+  // Exposed because the automatic pass runs at most once per session.
+  archiveUnchained,
   forceBlockSync,
   hasEnvelopeIdentity: () => !!getIdentity(),
   // Off-site backup / fast hydration (n8n → Google Drive). Opt-in, per-user,
