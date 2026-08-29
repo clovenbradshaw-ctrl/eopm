@@ -34,7 +34,8 @@ import { createRoom as mxCreateRoom, discoverRooms, getTimeline, onTimeline,
          onDecrypted, onLocalEchoUpdated, EventStatus,
          setName as mxSetRoomName, getDisplayName as mxGetDisplayName,
          setDisplayName as mxSetDisplayName,
-         getInviteCapability, canGrantLevel, ensureKeyExchangeOpen } from './rooms.js';
+         getInviteCapability, canGrantLevel, ensureKeyExchangeOpen,
+         onRoomStateType } from './rooms.js';
 import { VIEWER_PL } from './permissions.js';
 import { EventStore, requestPersistentStorage, getOpfsBreakdown, getCacheStorageUsage } from './store.js';
 import { vault, getLastUser, loadSecret, storeSecret, removeSecret } from './vault.js';
@@ -993,6 +994,7 @@ async function initBlockSync(roomId, store) {
     chained: new Set(),    // event_ids known to be in ANY member's chain
     queue: [],             // committed self events awaiting upload
     timer: null,
+    unsubMemberKeys: null, // grants the key to members who arrive while we're here
     busy: false,
     disabled: false,
     failures: 0,
@@ -1022,6 +1024,30 @@ async function initBlockSync(roomId, store) {
   ctx.wck = wck;
   publishMemberKey(client, NAMESPACE, roomId).catch(() => {});
   grantWorkspaceKey(client, NAMESPACE, roomId, wck).catch(() => {});
+
+  // Granting once on open is not enough for anyone invited with their own
+  // Matrix account: their join link carries no key (and shouldn't — it is
+  // shared casually, and the key is a read capability for the whole
+  // workspace), so they arrive keyless and publish a member_key. Nobody can
+  // pre-grant to them, because Matrix auth rules let only they write that
+  // event. If we only granted at open, the workspace would stay blank for
+  // them until some existing member happened to reopen the room — hours,
+  // or days.
+  //
+  // So watch for member_keys arriving and grant then. The inviter is
+  // almost always still sitting in the room when the person they just
+  // invited opens the link, which turns that wait into a few seconds.
+  // grantWorkspaceKey() already skips members who hold a key or have a
+  // grant, so a re-run on our own echo costs one state read and stops.
+  ctx.unsubMemberKeys = onRoomStateType(roomId, `${NAMESPACE}.member_key`, (event) => {
+    const who = event.getStateKey?.();
+    if (!who || who === client.getUserId?.()) return;
+    const live = roomBlockSync.get(roomId);
+    if (!live || live.disabled || !live.wck) return;
+    grantWorkspaceKey(client, NAMESPACE, roomId, live.wck)
+      .then(n => { if (n) console.info(`[wck] granted the workspace key to ${n} newly-arrived member(s)`); })
+      .catch(e => console.warn('[wck] grant on member_key failed:', e?.message || e));
+  });
 
   // DOWN: pull every member's chain and replay whatever the local store
   // is missing. store.append dedups by event_id, so events that also
@@ -1162,6 +1188,7 @@ function teardownBlockSync(roomId) {
   const ctx = roomBlockSync.get(roomId);
   if (!ctx) return;
   if (ctx.timer) { clearTimeout(ctx.timer); ctx.timer = null; }
+  if (ctx.unsubMemberKeys) { ctx.unsubMemberKeys(); ctx.unsubMemberKeys = null; }
   const finish = () => roomBlockSync.delete(roomId);
   if (ctx.queue.length > 0 && !ctx.disabled && !ctx.busy && getClient()) {
     flushBlockQueue(roomId).then(finish, finish);

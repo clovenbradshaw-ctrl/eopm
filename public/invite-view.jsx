@@ -374,7 +374,16 @@ function ExistingMemberTab({ roomId, roomTitle, state, onEmit, availableRoles })
         Invited <b>{link.mxid}</b> as {link.role}. This link drops them straight into the project once they sign in:
       </div>
       {roleWarning && <div style={{ fontSize: 10.5, color: 'var(--red)', marginBottom: 8, lineHeight: 1.4 }}>{roleWarning}</div>}
-      <LinkOut url={link.url} note="No password in this one — safe to share more casually. They sign in with their own account." />
+      <LinkOut url={link.url} note="No password and no key in this one — safe to share casually. They sign in with their own account." />
+      {/* The honest caveat. Their link carries no workspace key by design,
+          so they can only read once a member who holds one hands it over.
+          That happens automatically the moment they open the link — but
+          only while someone with the key has the app open. */}
+      <div style={{ fontSize: 10.5, color: 'var(--text-faint)', marginTop: 8, lineHeight: 1.45 }}>
+        Keep this tab open until they've opened it — the project unlocks for them the moment they
+        arrive. If you close it first, they'll see an empty project until you (or anyone already in
+        it) next open the app.
+      </div>
       {emailStatus === 'sending' && <div style={{ fontSize: 10.5, color: 'var(--text-faint)', marginTop: 8, display: 'flex', alignItems: 'center', gap: 6 }}><Spinner size={10} /> emailing {email}…</div>}
       {emailStatus === 'sent' && <div style={{ fontSize: 10.5, color: 'var(--green)', marginTop: 8 }}><i className="ph ph-check" aria-hidden="true"></i> emailed to {email}</div>}
       {emailStatus?.error && <div style={{ fontSize: 10.5, color: 'var(--red)', marginTop: 8 }}>couldn't email it: {emailStatus.error} — the link above still works.</div>}
