@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>collab</title>
+<meta name="theme-color" content="#fafafa">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=EB+Garamond:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#f5f5f4;
+  --surface:#ffffff;
+  --surface-2:#efefec;
+  --border:#dcdad4;
+  --text:#1a1a17;
+  --text-dim:#6b675e;
+  --sel:#3b82f6;
+  --accent:#111;
+  --danger:#b3261e;
+  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+*{ box-sizing:border-box; }
+html,body,#root{ height:100%; margin:0; }
+body{ background:var(--bg); color:var(--text); overflow:hidden; }
+button{ font-family:inherit; cursor:pointer; }
+
+/* ── password gate ── */
+.gate{ height:100%; display:flex; align-items:center; justify-content:center; background:var(--bg); }
+.gate form{ display:flex; flex-direction:column; gap:10px; background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:28px 32px; min-width:280px; box-shadow:0 4px 24px rgba(0,0,0,.06); }
+.gate-label{ font-size:13px; color:var(--text-dim); }
+.gate input{ font-size:16px; padding:10px 12px; border:1px solid var(--border); border-radius:6px; }
+.gate button{ font-size:14px; padding:10px 12px; border:none; border-radius:6px; background:var(--accent); color:#fff; }
+.gate-error{ font-size:12px; color:var(--danger); }
+
+.empty-state{ height:100%; display:flex; align-items:center; justify-content:center; color:var(--text-dim); font-size:14px; text-align:center; padding:0 24px; }
+.empty-state code{ background:var(--surface-2); padding:2px 6px; border-radius:4px; }
+
+.loading-state{ height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:16px; }
+.loading-spinner{ display:flex; gap:8px; }
+.loading-spinner div{ width:12px; height:12px; border-radius:50%; background:var(--sel); animation:collab-bounce 1.1s ease-in-out infinite; }
+.loading-spinner div:nth-child(2){ animation-delay:0.15s; }
+.loading-spinner div:nth-child(3){ animation-delay:0.3s; }
+@keyframes collab-bounce{
+  0%, 60%, 100% { transform:translateY(0); opacity:.5; }
+  30% { transform:translateY(-14px); opacity:1; }
+}
+.loading-label{ font-size:13px; color:var(--text-dim); letter-spacing:.02em; }
+
+/* ── shell ── */
+.app-shell{ display:flex; height:100%; }
+.main-pane{ flex:1; display:flex; flex-direction:column; min-width:0; }
+.topbar{ display:flex; align-items:center; gap:16px; padding:8px 16px; border-bottom:1px solid var(--border); background:var(--surface); }
+.topbar-title{ font-weight:600; font-size:14px; flex:0 0 auto; }
+.present-btn{ margin-left:auto; font-size:13px; padding:6px 14px; border:1px solid var(--border); border-radius:6px; background:var(--surface); }
+.present-btn:hover{ background:var(--surface-2); }
+
+/* ── rail ── */
+.rail{ width:120px; flex:0 0 auto; background:var(--surface); border-right:1px solid var(--border); overflow-y:auto; padding:10px 8px; display:flex; flex-direction:column; gap:8px; }
+.rail-thumb{ border:1px solid var(--border); background:#fff; border-radius:6px; padding:0; overflow:hidden; }
+.rail-thumb.active{ outline:2px solid var(--sel); }
+.rail-thumb-inner{ width:100%; position:relative; overflow:hidden; pointer-events:none; }
+.rail-thumb-n{ position:absolute; bottom:3px; left:3px; font-size:9px; line-height:1; color:#fff; background:rgba(0,0,0,.55); padding:2px 4px; border-radius:3px; z-index:10; }
+.rail-add{ font-size:12px; padding:6px; border:1px dashed var(--border); border-radius:6px; background:transparent; color:var(--text-dim); }
+.rail-add:hover{ background:var(--surface-2); }
+
+/* ── canvas ── */
+.canvas-pane{ flex:1; display:flex; flex-direction:column; min-height:0; }
+.toolbar{ display:flex; gap:6px; padding:6px 12px; border-bottom:1px solid var(--border); background:var(--surface); }
+.toolbar button{ font-size:12px; padding:5px 10px; border:1px solid var(--border); border-radius:6px; background:var(--surface); }
+.toolbar button:hover{ background:var(--surface-2); }
+.canvas-wrap{ flex:1; display:flex; align-items:center; justify-content:center; background:var(--surface-2); min-height:0; overflow:hidden; }
+.slide-surface-outer{ position:relative; flex:0 0 auto; box-shadow:0 2px 16px rgba(0,0,0,.12); }
+.slide-surface{ position:absolute; top:0; left:0; background:#fff; }
+
+.obj-box{ user-select:none; }
+.obj-text{ overflow:hidden; }
+.obj-grip{ position:absolute; top:-18px; left:-2px; font-size:12px; line-height:16px; width:18px; height:16px; text-align:center; background:var(--sel); color:#fff; border-radius:3px; cursor:grab; }
+.obj-handle{ position:absolute; right:-5px; bottom:-5px; width:10px; height:10px; background:var(--sel); border-radius:2px; cursor:nwse-resize; }
+.obj-delete{ position:absolute; top:-18px; right:-2px; width:16px; height:16px; line-height:14px; text-align:center; font-size:12px; border:none; border-radius:3px; background:var(--danger); color:#fff; padding:0; }
+
+.remote-cursor{ position:absolute; pointer-events:none; transform:translate(-2px,-2px); z-index:9999; }
+.remote-cursor-dot{ width:10px; height:10px; border-radius:50%; background:var(--sel); border:2px solid #fff; }
+.remote-cursor-label{ font-size:10px; background:var(--sel); color:#fff; padding:1px 5px; border-radius:3px; margin-top:2px; white-space:nowrap; }
+
+/* ── presence ── */
+.presence-tray{ display:flex; align-items:center; gap:8px; margin-left:auto; }
+.presence-count{ font-size:11px; color:var(--text-dim); }
+.presence-avatars{ display:flex; }
+.presence-avatar{ width:22px; height:22px; border-radius:50%; background:var(--surface-2); border:2px solid var(--surface); margin-left:-6px; font-size:9px; display:flex; align-items:center; justify-content:center; color:var(--text-dim); }
+.presence-avatar.is-active{ background:var(--sel); color:#fff; }
+
+/* ── presenter ── */
+.presenter{ position:fixed; inset:0; background:#000; display:flex; align-items:center; justify-content:center; z-index:10000; }
+.presenter-wrap{ width:100vw; height:100vh; display:flex; align-items:center; justify-content:center; }
+.presenter-slide-outer{ position:relative; }
+.presenter-exit{ position:fixed; top:16px; right:16px; font-size:12px; padding:6px 12px; border:1px solid rgba(255,255,255,.3); border-radius:6px; background:rgba(255,255,255,.1); color:#fff; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="module" src="./main.jsx"></script>
+</body>
+</html>
