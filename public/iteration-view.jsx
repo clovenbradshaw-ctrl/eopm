@@ -90,7 +90,7 @@ function IterationView({
       <div className="tv-body single schema-body">
         <header className="page-hero entity-hero">
           <div className="page-hero-eyebrow">
-            <span className="page-hero-kind"><span className="page-hero-glyph">⊛</span> iterations</span>
+            <span className="page-hero-kind"><span className="page-hero-glyph">◉</span> iterations</span>
             <span className="page-hero-sep">·</span>
             <span className="page-hero-crumb">{room.title || 'workspace'}<span className="page-hero-slash">/</span>{entityType}<span className="page-hero-slash">/</span>{entityAnchor}</span>
             <button className="entity-back" onClick={backToTimeline} title="back to full timeline">← full timeline</button>

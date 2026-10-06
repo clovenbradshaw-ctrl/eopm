@@ -195,7 +195,7 @@ function EntityTimelineView({
               <button
                 className="tv-inline-link"
                 onClick={() => setSelection({ kind: 'slice', sliceId: `${entityType}.iteration.${entityAnchor}`, sliceKind: 'iteration', tableId: entityType, entityAnchor })}
-              >⊛ iterations{state.frames?.some(f => f.scope === entityAnchor) ? ` (${state.frames.filter(f => f.scope === entityAnchor).length})` : ''} →</button>
+              >◉ iterations{state.frames?.some(f => f.scope === entityAnchor) ? ` (${state.frames.filter(f => f.scope === entityAnchor).length})` : ''} →</button>
             )}
             {siblings.length > 1 && (
               <span style={{display:'flex',alignItems:'center',gap:6}}>
